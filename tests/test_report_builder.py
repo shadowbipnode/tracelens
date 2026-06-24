@@ -1,4 +1,9 @@
-from backend.report_builder import build_dns_insights, build_summary, enrich_report
+from backend.report_builder import (
+    build_dns_insights,
+    build_shodan_insights,
+    build_summary,
+    enrich_report,
+)
 
 
 def test_summary_builder_derives_normalized_metrics():
@@ -28,6 +33,12 @@ def test_summary_builder_derives_normalized_metrics():
             }
         },
         "wayback": {"data": {"captures": [{}, {}, {}]}},
+        "shodan": {
+            "data": {
+                "subdomains": ["api.example.com", "mail.example.com"],
+                "records": [{}, {}, {}],
+            }
+        },
     }
     timeline = [
         {
@@ -58,6 +69,8 @@ def test_summary_builder_derives_normalized_metrics():
         "certificate_count": 2,
         "subdomain_count": 1,
         "wayback_capture_count": 3,
+        "shodan_subdomain_count": 2,
+        "shodan_record_count": 3,
         "first_seen": "2020-07-01T00:00:00+00:00",
         "last_updated": "2025-02-01T00:00:00+00:00",
     }
@@ -106,6 +119,48 @@ def test_dns_insights_are_evidence_backed():
     assert all(insight["evidence"] for insight in insights)
 
 
+def test_shodan_insights_cover_available_skipped_and_error_states():
+    available = build_shodan_insights(
+        {
+            "shodan": {
+                "status": "ok",
+                "data": {
+                    "subdomain_count": 2,
+                    "record_count": 3,
+                    "tags": ["cdn"],
+                },
+            }
+        }
+    )
+    skipped = build_shodan_insights(
+        {
+            "shodan": {
+                "status": "skipped",
+                "data": {},
+                "errors": ["SHODAN_API_KEY not configured"],
+            }
+        }
+    )
+    unavailable = build_shodan_insights(
+        {
+            "shodan": {
+                "status": "error",
+                "data": {},
+                "errors": ["rate limited"],
+                "error": {
+                    "category": "rate_limited",
+                    "message": "rate limited",
+                    "recoverable": True,
+                },
+            }
+        }
+    )
+
+    assert available[0]["title"] == "Shodan passive data available"
+    assert skipped[0]["title"] == "Shodan skipped because API key missing"
+    assert unavailable[0]["title"] == "Shodan rate limited/unavailable"
+
+
 def test_enrich_report_upgrades_existing_report_shape():
     report = {
         "target": "example.com",
@@ -124,5 +179,7 @@ def test_enrich_report_upgrades_existing_report_shape():
     enriched = enrich_report(report)
 
     assert enriched["summary"]["target"] == "example.com"
+    assert enriched["summary"]["shodan_subdomain_count"] == 0
+    assert enriched["summary"]["shodan_record_count"] == 0
     assert enriched["insights"] == []
     assert enriched["timeline"][0]["label"] == "Scan completed"

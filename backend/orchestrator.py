@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
-from backend.collectors import collect_crtsh, collect_dns, collect_wayback, collect_whois
+from backend.collectors import (
+    collect_crtsh,
+    collect_dns,
+    collect_shodan,
+    collect_wayback,
+    collect_whois,
+)
 from backend.collectors.base import error_result, iso_now
 from backend.config import Settings
 from backend.report_builder import enrich_report
@@ -18,7 +24,13 @@ def _whois(target: str, _settings: Settings) -> Dict[str, Any]:
     return collect_whois(target)
 
 
-COLLECTORS: List[Collector] = [_dns, _whois, collect_crtsh, collect_wayback]
+COLLECTORS: List[Collector] = [
+    _dns,
+    _whois,
+    collect_crtsh,
+    collect_wayback,
+    collect_shodan,
+]
 
 
 def _timeline(

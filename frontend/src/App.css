@@ -403,6 +403,82 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.integration-notice {
+  margin: 0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--muted);
+  background: var(--background);
+}
+
+.shodan-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 180px));
+  gap: 10px;
+}
+
+.shodan-counts > div {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 14px;
+  background: var(--background);
+}
+
+.shodan-counts span,
+.shodan-counts strong {
+  display: block;
+}
+
+.shodan-counts span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.shodan-counts strong {
+  margin-top: 8px;
+  font-size: 1.2rem;
+}
+
+.shodan-preview {
+  margin-top: 18px;
+}
+
+.shodan-preview h3 {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+}
+
+.shodan-preview ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shodan-preview li {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--muted);
+  background: var(--background);
+  font: 0.74rem var(--mono);
+}
+
+.shodan-section > details {
+  margin-top: 16px;
+}
+
+.shodan-section > details > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+
 pre {
   max-height: 420px;
   overflow: auto;

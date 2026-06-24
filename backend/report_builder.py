@@ -54,6 +54,7 @@ def build_summary(
     whois_data = collectors.get("whois", {}).get("data", {})
     crtsh_data = collectors.get("crtsh", {}).get("data", {})
     wayback_data = collectors.get("wayback", {}).get("data", {})
+    shodan_data = collectors.get("shodan", {}).get("data", {})
 
     dated_events = [
         event
@@ -72,6 +73,8 @@ def build_summary(
     certificates = crtsh_data.get("certificates", [])
     subdomains = crtsh_data.get("subdomains", [])
     captures = wayback_data.get("captures", [])
+    shodan_subdomains = shodan_data.get("subdomains", [])
+    shodan_records = shodan_data.get("records", [])
 
     return {
         "target": target,
@@ -96,6 +99,14 @@ def build_summary(
         "wayback_capture_count": wayback_data.get(
             "capture_count",
             len(captures) if isinstance(captures, list) else 0,
+        ),
+        "shodan_subdomain_count": shodan_data.get(
+            "subdomain_count",
+            len(shodan_subdomains) if isinstance(shodan_subdomains, list) else 0,
+        ),
+        "shodan_record_count": shodan_data.get(
+            "record_count",
+            len(shodan_records) if isinstance(shodan_records, list) else 0,
         ),
         "first_seen": first_seen,
         "last_updated": whois_data.get("updated_date"),
@@ -186,6 +197,67 @@ def build_dns_insights(
     return insights
 
 
+def build_shodan_insights(
+    collectors: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    collector = collectors.get("shodan")
+    if not collector:
+        return []
+
+    status = collector.get("status")
+    data = collector.get("data", {})
+    detail = collector.get("error") or next(
+        iter(collector.get("error_details", [])), {}
+    )
+    errors = collector.get("errors", [])
+
+    if status == "ok":
+        return [
+            {
+                "type": "shodan",
+                "severity": "info",
+                "title": "Shodan passive data available",
+                "description": "Shodan returned passive DNS intelligence for this domain.",
+                "evidence": [
+                    {
+                        "subdomain_count": data.get("subdomain_count", 0),
+                        "record_count": data.get("record_count", 0),
+                        "tags": data.get("tags", []),
+                    }
+                ],
+            }
+        ]
+
+    if status == "skipped":
+        return [
+            {
+                "type": "shodan",
+                "severity": "notice",
+                "title": "Shodan skipped because API key missing",
+                "description": "Optional Shodan collection was not run.",
+                "evidence": errors,
+            }
+        ]
+
+    if status == "error":
+        category = detail.get("category")
+        if category == "rate_limited":
+            description = "Shodan rate limited the passive DNS request."
+        else:
+            description = "Shodan passive DNS data was temporarily unavailable."
+        return [
+            {
+                "type": "shodan",
+                "severity": "warning",
+                "title": "Shodan rate limited/unavailable",
+                "description": description,
+                "evidence": [detail] if detail else errors,
+            }
+        ]
+
+    return []
+
+
 def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
     timeline = report.get("timeline", [])
     for event in timeline:
@@ -205,5 +277,8 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
         collectors,
         timeline,
     )
-    report["insights"] = build_dns_insights(collectors)
+    report["insights"] = [
+        *build_dns_insights(collectors),
+        *build_shodan_insights(collectors),
+    ]
     return report

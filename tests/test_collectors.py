@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 
-from backend.collectors import crtsh, dns, wayback, whois
+import httpx
+import pytest
+
+from backend.collectors import crtsh, dns, shodan, wayback, whois
 from backend.config import Settings
 from backend.models.report import CollectorResult
 
@@ -114,3 +117,119 @@ def test_wayback_unexpected_payload_is_parse_error(monkeypatch):
 
     assert result["status"] == "error"
     assert result["error"]["category"] == "parse_error"
+
+
+def test_shodan_skips_when_api_key_is_missing():
+    result = shodan.collect_shodan(
+        "example.com", Settings(SHODAN_API_KEY="", _env_file=None)
+    )
+
+    assert_structure(result, "shodan")
+    assert result["status"] == "skipped"
+    assert result["errors"] == ["SHODAN_API_KEY not configured"]
+    assert result["error"] == {
+        "category": "not_configured",
+        "message": "SHODAN_API_KEY not configured",
+        "recoverable": True,
+    }
+
+
+def test_shodan_parses_passive_domain_response(monkeypatch):
+    payload = {
+        "domain": "example.com",
+        "tags": ["cdn", "ipv6"],
+        "subdomains": ["api", "www.example.com"],
+        "data": [
+            {
+                "subdomain": "api",
+                "type": "A",
+                "value": "192.0.2.10",
+                "last_seen": "2026-06-20",
+            },
+            {
+                "subdomain": "mail",
+                "type": "MX",
+                "value": "mx.example.net",
+                "last_seen": "2026-06-21",
+            },
+        ],
+        "more": False,
+    }
+    monkeypatch.setattr(
+        shodan.httpx,
+        "get",
+        lambda *args, **kwargs: Response(payload),
+    )
+
+    result = shodan.collect_shodan(
+        "example.com", Settings(SHODAN_API_KEY="test-key", _env_file=None)
+    )
+
+    assert_structure(result, "shodan")
+    assert result["status"] == "ok"
+    assert result["data"]["subdomains"] == [
+        "api.example.com",
+        "mail.example.com",
+        "www.example.com",
+    ]
+    assert result["data"]["records"][0] == {
+        "subdomain": "api",
+        "fqdn": "api.example.com",
+        "type": "A",
+        "value": "192.0.2.10",
+        "last_seen": "2026-06-20",
+    }
+    assert result["data"]["tags"] == ["cdn", "ipv6"]
+    assert result["data"]["subdomain_count"] == 3
+    assert result["data"]["record_count"] == 2
+    assert result["data"]["source_metadata"] == {
+        "endpoint": "dns/domain",
+        "domain": "example.com",
+        "more": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("status_code", "category"),
+    [
+        (401, "bad_response"),
+        (403, "bad_response"),
+        (429, "rate_limited"),
+        (500, "unavailable"),
+        (503, "unavailable"),
+    ],
+)
+def test_shodan_http_errors_are_structured(monkeypatch, status_code, category):
+    def fail(*args, **kwargs):
+        request = httpx.Request("GET", "https://api.shodan.io/dns/domain/example.com")
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"Shodan returned {status_code}",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(shodan.httpx, "get", fail)
+
+    result = shodan.collect_shodan(
+        "example.com", Settings(SHODAN_API_KEY="test-key", _env_file=None)
+    )
+
+    assert_structure(result, "shodan")
+    assert result["status"] == "error"
+    assert result["error"]["category"] == category
+    assert result["error"]["recoverable"] is True
+
+
+def test_shodan_timeout_is_structured(monkeypatch):
+    def fail(*args, **kwargs):
+        raise httpx.ReadTimeout("Shodan timed out")
+
+    monkeypatch.setattr(shodan.httpx, "get", fail)
+
+    result = shodan.collect_shodan(
+        "example.com", Settings(SHODAN_API_KEY="test-key", _env_file=None)
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == "timeout"

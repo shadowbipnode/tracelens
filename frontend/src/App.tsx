@@ -43,6 +43,8 @@ type ReportSummary = {
   certificate_count: number
   subdomain_count: number
   wayback_capture_count: number
+  shodan_subdomain_count: number
+  shodan_record_count: number
   first_seen: string | null
   last_updated: string | null
 }
@@ -113,6 +115,8 @@ function summaryCards(summary: ReportSummary) {
     ['Certificates', summary.certificate_count.toLocaleString()],
     ['Subdomains', summary.subdomain_count.toLocaleString()],
     ['Wayback captures', summary.wayback_capture_count.toLocaleString()],
+    ['Shodan subdomains', (summary.shodan_subdomain_count ?? 0).toLocaleString()],
+    ['Shodan records', (summary.shodan_record_count ?? 0).toLocaleString()],
     ['First seen', formatDate(summary.first_seen)],
   ]
 }
@@ -175,6 +179,72 @@ function DataSection({
       ) : null}
       <pre>{JSON.stringify(collector ?? {}, null, 2)}</pre>
     </details>
+  )
+}
+
+function ShodanSection({ collector }: { collector?: CollectorResult }) {
+  const detail = collector?.error ?? collector?.error_details?.[0]
+  const data = collector?.data ?? {}
+  const subdomains = Array.isArray(data.subdomains)
+    ? data.subdomains.filter((value): value is string => typeof value === 'string')
+    : []
+
+  return (
+    <section className="panel report-section shodan-section">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Optional passive source</p>
+          <h2>Shodan</h2>
+        </div>
+        <span className={`status ${collector?.status ?? 'skipped'}`}>
+          {collector?.status ?? 'not run'}
+        </span>
+      </div>
+      {collector?.status === 'skipped' ? (
+        <p className="integration-notice">Optional API key not configured</p>
+      ) : null}
+      {collector?.status === 'error' && detail ? (
+        <div className="source-error">
+          <strong>{errorLabels[detail.category] ?? 'Collector error'}</strong>
+          <span>Raw details are included below.</span>
+        </div>
+      ) : null}
+      {collector?.status === 'ok' ? (
+        <>
+          <div className="shodan-counts">
+            <div>
+              <span>Subdomains</span>
+              <strong>{subdomains.length.toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>Records</span>
+              <strong>
+                {(typeof data.record_count === 'number'
+                  ? data.record_count
+                  : 0
+                ).toLocaleString()}
+              </strong>
+            </div>
+          </div>
+          <div className="shodan-preview">
+            <h3>Subdomain preview</h3>
+            {subdomains.length ? (
+              <ul>
+                {subdomains.slice(0, 10).map((subdomain) => (
+                  <li key={subdomain}>{subdomain}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No subdomains returned.</p>
+            )}
+          </div>
+        </>
+      ) : null}
+      <details>
+        <summary>View raw Shodan JSON</summary>
+        <pre>{JSON.stringify(collector ?? {}, null, 2)}</pre>
+      </details>
+    </section>
   )
 }
 
@@ -250,7 +320,7 @@ function App() {
           <p className="eyebrow">Passive domain intelligence</p>
           <h1>TraceLens</h1>
         </div>
-        <span className="version">v0.2.0-alpha2</span>
+        <span className="version">v0.3.0-alpha3</span>
       </header>
 
       <section className="panel scan-form">
@@ -372,7 +442,9 @@ function App() {
                         <span className={`status ${collector.status}`}>
                           {collector.status}
                         </span>
-                        {detail ? (
+                        {collector.status === 'skipped' ? (
+                          <small>Optional API key not configured</small>
+                        ) : detail ? (
                           <small>{errorLabels[detail.category] ?? 'Collector error'}</small>
                         ) : (
                           <small>Source completed normally</small>
@@ -387,7 +459,7 @@ function App() {
                 <div className="section-heading">
                   <div>
                     <p className="eyebrow">Evidence-backed findings</p>
-                    <h2>DNS insights</h2>
+                    <h2>Insights</h2>
                   </div>
                   <span>{report.insights.length} findings</span>
                 </div>
@@ -408,9 +480,11 @@ function App() {
                     ))}
                   </div>
                 ) : (
-                  <p className="muted">No deterministic DNS insights were identified.</p>
+                  <p className="muted">No deterministic insights were identified.</p>
                 )}
               </section>
+
+              <ShodanSection collector={report.collectors.shodan} />
 
               <section className="panel report-section">
                 <div className="section-heading">
