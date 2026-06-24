@@ -1,8 +1,10 @@
+import inspect
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
 from backend.collectors import (
     collect_crtsh,
+    collect_censys,
     collect_dns,
     collect_shodan,
     collect_wayback,
@@ -13,7 +15,7 @@ from backend.config import Settings
 from backend.report_builder import enrich_report
 
 
-Collector = Callable[[str, Settings], Dict[str, Any]]
+Collector = Callable[..., Dict[str, Any]]
 
 
 def _dns(target: str, _settings: Settings) -> Dict[str, Any]:
@@ -26,11 +28,24 @@ def _whois(target: str, _settings: Settings) -> Dict[str, Any]:
 
 COLLECTORS: List[Collector] = [
     _dns,
+    collect_censys,
     _whois,
     collect_crtsh,
     collect_wayback,
     collect_shodan,
 ]
+
+
+def _run_collector(
+    collector: Collector,
+    target: str,
+    settings: Settings,
+    results: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    parameters = inspect.signature(collector).parameters
+    if "context" in parameters:
+        return collector(target, settings, context=results)
+    return collector(target, settings)
 
 
 def _timeline(
@@ -94,6 +109,37 @@ def _timeline(
             }
         )
 
+    censys_events = []
+    for host in results.get("censys", {}).get("data", {}).get("hosts", []):
+        for service in host.get("services", []):
+            timestamp = service.get("scan_time")
+            if not timestamp:
+                continue
+            censys_events.append(
+                {
+                    "type": "censys_service_observed",
+                    "label": "Censys service observed",
+                    "timestamp": timestamp,
+                    "source": "censys",
+                    "detail": " · ".join(
+                        str(value)
+                        for value in (
+                            host.get("ip"),
+                            service.get("port"),
+                            service.get("protocol")
+                            or service.get("service_name"),
+                        )
+                        if value is not None
+                    ),
+                }
+            )
+    events.extend(
+        sorted(
+            censys_events,
+            key=lambda event: _timeline_sort_key(event["timestamp"]),
+        )[:20]
+    )
+
     events.append(
         {
             "type": "scan_completed",
@@ -110,7 +156,10 @@ def _timeline_sort_key(value: str) -> datetime:
         return datetime.strptime(value, "%Y%m%d%H%M%S").replace(
             tzinfo=timezone.utc
         )
-    return parse_iso_datetime(value)
+    try:
+        return parse_iso_datetime(value)
+    except ValueError:
+        return datetime.max.replace(tzinfo=timezone.utc)
 
 
 def run_passive_scan(target: str, settings: Settings) -> Dict[str, Any]:
@@ -119,7 +168,7 @@ def run_passive_scan(target: str, settings: Settings) -> Dict[str, Any]:
 
     for collector in COLLECTORS:
         try:
-            result = collector(target, settings)
+            result = _run_collector(collector, target, settings, results)
         except Exception as exc:
             source = collector.__name__.removeprefix("collect_").lstrip("_")
             result = error_result(source, iso_now(), exc)

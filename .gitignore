@@ -9,6 +9,8 @@ htmlcov/
 
 .env
 .env.local
+.env.*
+!.env.example
 .tracelens/
 *.sqlite
 *.sqlite3

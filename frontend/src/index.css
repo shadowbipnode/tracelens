@@ -1,15 +1,19 @@
 :root {
-  --background: #0b1119;
-  --panel: #111a25;
-  --surface: #1a2532;
-  --border: #253242;
-  --border-strong: #38495c;
-  --text: #eef4f8;
-  --muted: #91a0af;
-  --accent: #4ee0a1;
-  --accent-soft: rgba(78, 224, 161, 0.12);
-  --danger: #ff8c83;
-  --danger-soft: rgba(255, 140, 131, 0.12);
+  --background: #090f16;
+  --background-raised: #0c141e;
+  --panel: #111b27;
+  --surface: #182432;
+  --surface-subtle: rgba(24, 36, 50, 0.55);
+  --border: #223140;
+  --border-strong: #34495c;
+  --text: #edf4f7;
+  --muted: #8797a6;
+  --accent: #4adea8;
+  --accent-soft: rgba(74, 222, 168, 0.11);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.1);
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.1);
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -30,6 +34,9 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 80% 0%, rgba(78, 224, 161, 0.08), transparent 28rem),
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    radial-gradient(circle at 80% 0%, rgba(74, 222, 168, 0.07), transparent 30rem),
     var(--background);
+  background-size: 32px 32px, 32px 32px, auto, auto;
 }

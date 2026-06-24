@@ -20,6 +20,8 @@ def http_error(status_code):
         (httpx.ReadTimeout("timed out"), "timeout"),
         (TimeoutError("timed out"), "timeout"),
         (http_error(408), "timeout"),
+        (http_error(401), "invalid_credentials"),
+        (http_error(403), "forbidden"),
         (http_error(429), "rate_limited"),
         (http_error(503), "unavailable"),
         (http_error(404), "bad_response"),

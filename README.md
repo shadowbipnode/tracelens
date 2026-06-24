@@ -1,7 +1,7 @@
 # TraceLens
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/shadowbipnode)
-![Status](https://img.shields.io/badge/status-v0.3.0--alpha3-brightgreen)
+![Status](https://img.shields.io/badge/status-v0.4.0--alpha4-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
 ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)
@@ -11,7 +11,7 @@
 
 TraceLens is a passive-first domain intelligence application. It collects public information, normalizes source results, derives evidence-backed insights, builds an investigation timeline, and stores reports for later review.
 
-## v0.3.0-alpha3 capabilities
+## v0.4.0-alpha4 capabilities
 
 - Validate and scan one domain at a time
 - Collect DNS records without subdomain brute forcing
@@ -19,13 +19,16 @@ TraceLens is a passive-first domain intelligence application. It collects public
 - Query certificate transparency data from crt.sh
 - Query archived URL metadata from the Wayback Machine
 - Optionally query Shodan passive DNS data for subdomains, records, and tags
+- Optionally query Censys host intelligence for IP addresses already found in DNS A and AAAA records
 - Continue scans when an individual collector fails
 - Store scan reports in SQLite
-- Review summary cards for registration, DNS, certificate, subdomain, and archive metrics
-- Review deterministic DNS insights with supporting evidence
-- Browse and filter recent scans in a React dashboard
+- Review summary metrics for registration, DNS, certificate, archive, Shodan, and Censys evidence
+- Review deterministic DNS and host intelligence insights with supporting evidence
+- Use a professional investigation dashboard with dedicated intelligence sections
+- Review Censys hosts, services, ports, protocols, ASN metadata, organizations, and locations
+- Browse, search, and filter recent scans
 - See user-friendly collector error categories while retaining raw details
-- Review a simplified chronological timeline
+- Review a chronological timeline with certificate and Censys service observations
 - Download the complete current report as JSON
 - Access scan metadata and normalized reports through FastAPI
 
@@ -65,13 +68,14 @@ Available settings:
 ```text
 TRACELENS_DB_PATH=.tracelens/tracelens.sqlite3
 TRACELENS_HTTP_TIMEOUT=20
-TRACELENS_USER_AGENT=TraceLens/0.3
+TRACELENS_USER_AGENT=TraceLens/0.4
 SHODAN_API_KEY=
+CENSYS_API_TOKEN=
 ```
 
 ## Optional API Integrations
 
-TraceLens works without API keys. Shodan integration is optional and is skipped when `SHODAN_API_KEY` is empty.
+TraceLens works without API keys. Shodan and Censys integrations are optional. A missing key or token causes the related collector to be skipped without making the scan partial.
 
 Create or sign in to a Shodan account at https://account.shodan.io, then copy the API key shown in the account overview. Add it to your local `.env` file:
 
@@ -79,7 +83,17 @@ Create or sign in to a Shodan account at https://account.shodan.io, then copy th
 SHODAN_API_KEY=
 ```
 
-Do not commit `.env` or share the key. Account access and API limits depend on the Shodan plan.
+For Censys host intelligence, create a Personal Access Token and add it to your local `.env` file:
+
+```dotenv
+CENSYS_API_TOKEN=
+```
+
+The Censys collector only looks up IP addresses already discovered through the scan's DNS A and AAAA records. It does not resolve additional targets, connect to target services, or scan ports. Lookups are limited to 10 IP addresses per scan and normalized service data is kept compact.
+
+`CENSYS_API_ID` and `CENSYS_API_SECRET` remain available as legacy or future configuration fields, but v0.4.0-alpha4 uses `CENSYS_API_TOKEN`.
+
+Do not commit `.env` or share credentials. Account access and API limits depend on each provider's plan.
 
 ## Run locally
 
@@ -142,7 +156,7 @@ External services are mocked in the test suite.
 
 ## Passive-first security model
 
-The current release only uses public DNS, WHOIS, certificate transparency, web archive, and optional Shodan passive DNS sources. It does not connect to target web services or enumerate target infrastructure through active probes. Each collector has a timeout, returns classified structured errors, and cannot terminate the remaining collection sequence.
+The current release only uses public DNS, WHOIS, certificate transparency, web archive, optional Shodan passive DNS, and optional Censys host intelligence sources. Censys requests are limited to addresses already present in DNS results. TraceLens does not connect to target web services or enumerate target infrastructure through active probes. Each collector has a timeout, returns classified structured errors, and cannot terminate the remaining collection sequence.
 
 Use TraceLens only for lawful research and analysis.
 

@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 
 type CollectorStatus = 'ok' | 'error' | 'skipped'
@@ -45,6 +45,10 @@ type ReportSummary = {
   wayback_capture_count: number
   shodan_subdomain_count: number
   shodan_record_count: number
+  censys_host_count: number
+  censys_service_count: number
+  censys_asn_count: number
+  censys_port_count: number
   first_seen: string | null
   last_updated: string | null
 }
@@ -77,6 +81,38 @@ type ScanSummary = {
   completed_at: string | null
 }
 
+type CensysService = {
+  port?: number
+  protocol?: string
+  transport_protocol?: string
+  service_name?: string
+  scan_time?: string
+  tls_certificate_names?: string[]
+}
+
+type CensysHost = {
+  ip: string
+  location?: {
+    country?: string
+    country_code?: string
+    city?: string
+  }
+  autonomous_system?: {
+    asn?: number | string
+    name?: string
+    description?: string
+    bgp_prefix?: string
+    country_code?: string
+  }
+  whois?: {
+    organization?: string
+    network_name?: string
+  }
+  services: CensysService[]
+  service_count: number
+  services_truncated?: boolean
+}
+
 type DisplayTimelineEvent = TimelineEvent & {
   count?: number
   endTimestamp?: string
@@ -85,19 +121,16 @@ type DisplayTimelineEvent = TimelineEvent & {
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL ?? '' })
 
 const errorLabels: Record<string, string> = {
-  timeout: 'Timeout',
+  timeout: 'Request timed out',
   rate_limited: 'Rate limited',
-  unavailable: 'Source temporarily unavailable',
+  unavailable: 'Source unavailable',
   bad_response: 'Unexpected response',
-  parse_error: 'Unexpected response',
+  parse_error: 'Response could not be parsed',
   network_error: 'Network error',
+  invalid_credentials: 'Invalid credentials',
+  forbidden: 'Access forbidden',
+  plan_restricted: 'Plan restricted',
   unexpected_error: 'Unexpected error',
-}
-
-function formatDate(value: string | null) {
-  if (!value) return 'Not available'
-  const date = new Date(normalizeTimestamp(value))
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 function normalizeTimestamp(value: string) {
@@ -106,36 +139,61 @@ function normalizeTimestamp(value: string) {
     : value
 }
 
-function summaryCards(summary: ReportSummary) {
-  return [
-    ['Domain age', summary.domain_age_years === null ? 'Unknown' : `${summary.domain_age_years} years`],
-    ['Registrar', summary.registrar ?? 'Unknown'],
-    ['DNS addresses', `${summary.a_count} IPv4 · ${summary.aaaa_count} IPv6`],
-    ['Mail and nameservers', `${summary.mx_count} MX · ${summary.nameserver_count} NS`],
-    ['Certificates', summary.certificate_count.toLocaleString()],
-    ['Subdomains', summary.subdomain_count.toLocaleString()],
-    ['Wayback captures', summary.wayback_capture_count.toLocaleString()],
-    ['Shodan subdomains', (summary.shodan_subdomain_count ?? 0).toLocaleString()],
-    ['Shodan records', (summary.shodan_record_count ?? 0).toLocaleString()],
-    ['First seen', formatDate(summary.first_seen)],
-  ]
+function formatDate(value: string | null, compact = false) {
+  if (!value) return 'Not available'
+  const date = new Date(normalizeTimestamp(value))
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: compact ? 'medium' : 'long',
+    timeStyle: compact ? undefined : 'short',
+  }).format(date)
+}
+
+function asStrings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+function asObjects(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is Record<string, unknown> =>
+          typeof item === 'object' && item !== null,
+      )
+    : []
+}
+
+function evidenceLabel(value: unknown) {
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (typeof value === 'object' && value !== null) {
+    return Object.entries(value)
+      .map(([key, item]) => `${key.replaceAll('_', ' ')}: ${String(item)}`)
+      .join(' · ')
+  }
+  return String(value)
 }
 
 function simplifyTimeline(events: TimelineEvent[]): DisplayTimelineEvent[] {
-  const certificateEvents = events.filter((event) => event.type === 'certificate_observed')
-  if (certificateEvents.length <= 5) return events
-
-  const otherEvents = events.filter((event) => event.type !== 'certificate_observed')
-  return [
-    ...otherEvents,
-    {
-      ...certificateEvents[0],
-      label: 'Certificates observed',
-      detail: `${certificateEvents.length} certificate observations`,
-      count: certificateEvents.length,
-      endTimestamp: certificateEvents.at(-1)?.timestamp,
-    },
-  ].sort(
+  const groupedTypes = new Set(['certificate_observed', 'censys_service_observed'])
+  const grouped = [...groupedTypes].flatMap((type) => {
+    const matches = events.filter((event) => event.type === type)
+    if (matches.length <= 5) return matches
+    return [
+      {
+        ...matches[0],
+        label:
+          type === 'certificate_observed'
+            ? 'Certificates observed'
+            : 'Censys services observed',
+        detail: `${matches.length} observations`,
+        count: matches.length,
+        endTimestamp: matches.at(-1)?.timestamp,
+      },
+    ]
+  })
+  const other = events.filter((event) => !groupedTypes.has(event.type))
+  return [...other, ...grouped].sort(
     (left, right) =>
       new Date(normalizeTimestamp(left.timestamp)).getTime() -
       new Date(normalizeTimestamp(right.timestamp)).getTime(),
@@ -155,96 +213,441 @@ function downloadReport(report: Report) {
   URL.revokeObjectURL(url)
 }
 
-function DataSection({
-  title,
-  collector,
+function StatusBadge({
+  status,
+  children,
 }: {
-  title: string
-  collector?: CollectorResult
+  status: string
+  children?: ReactNode
 }) {
-  const detail = collector?.error ?? collector?.error_details?.[0]
+  return <span className={`status ${status}`}>{children ?? status}</span>
+}
+
+function Section({
+  eyebrow,
+  title,
+  meta,
+  children,
+  className = '',
+}: {
+  eyebrow: string
+  title: string
+  meta?: ReactNode
+  children: ReactNode
+  className?: string
+}) {
   return (
-    <details className="panel report-section">
-      <summary>
-        <span>{title}</span>
-        <span className={`status ${collector?.status ?? 'skipped'}`}>
-          {collector?.status ?? 'not run'}
-        </span>
-      </summary>
-      {detail ? (
-        <div className="source-error">
-          <strong>{errorLabels[detail.category] ?? 'Collector error'}</strong>
-          <span>Raw details are included below.</span>
+    <section className={`panel report-section ${className}`}>
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
         </div>
-      ) : null}
-      <pre>{JSON.stringify(collector ?? {}, null, 2)}</pre>
-    </details>
+        {meta}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function SourceState({ collector }: { collector?: CollectorResult }) {
+  const detail = collector?.error ?? collector?.error_details?.[0]
+  if (collector?.status === 'skipped') {
+    const reason =
+      typeof collector.data.reason === 'string'
+        ? collector.data.reason
+        : 'not_configured'
+    return (
+      <div className="source-state skipped-state">
+        <strong>Optional source skipped</strong>
+        <span>
+          {reason === 'no_ip_addresses'
+            ? 'No DNS A or AAAA addresses were available.'
+            : collector.errors[0] ?? 'This integration is not configured.'}
+        </span>
+      </div>
+    )
+  }
+  if (collector?.status === 'error') {
+    return (
+      <div className="source-state error-state">
+        <strong>{errorLabels[detail?.category ?? ''] ?? 'Collector error'}</strong>
+        <span>{detail?.message ?? collector.errors[0]}</span>
+      </div>
+    )
+  }
+  return null
+}
+
+function ChipList({
+  values,
+  empty = 'No observations returned.',
+  limit = 16,
+}: {
+  values: Array<string | number>
+  empty?: string
+  limit?: number
+}) {
+  if (!values.length) return <p className="muted">{empty}</p>
+  return (
+    <div className="chips">
+      {values.slice(0, limit).map((value) => (
+        <span key={String(value)}>{value}</span>
+      ))}
+      {values.length > limit ? <span>+{values.length - limit} more</span> : null}
+    </div>
+  )
+}
+
+function DomainOverview({ report }: { report: Report }) {
+  const summary = report.summary
+  return (
+    <Section
+      eyebrow="Investigation profile"
+      title="Domain Overview"
+      meta={<StatusBadge status={report.status} />}
+    >
+      <div className="overview-grid">
+        <div>
+          <span>Registrar</span>
+          <strong>{summary.registrar ?? 'Unknown'}</strong>
+        </div>
+        <div>
+          <span>Domain age</span>
+          <strong>
+            {summary.domain_age_years === null
+              ? 'Unknown'
+              : `${summary.domain_age_years} years`}
+          </strong>
+        </div>
+        <div>
+          <span>First evidence</span>
+          <strong>{formatDate(summary.first_seen, true)}</strong>
+        </div>
+        <div>
+          <span>WHOIS updated</span>
+          <strong>{formatDate(summary.last_updated, true)}</strong>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+function DnsSection({ collector }: { collector?: CollectorResult }) {
+  const records =
+    typeof collector?.data.records === 'object' && collector.data.records !== null
+      ? (collector.data.records as Record<string, unknown>)
+      : {}
+  const types = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'CNAME', 'CAA']
+  return (
+    <Section
+      eyebrow="Resolution evidence"
+      title="DNS Intelligence"
+      meta={<StatusBadge status={collector?.status ?? 'skipped'} />}
+    >
+      <SourceState collector={collector} />
+      <div className="record-grid">
+        {types.map((type) => {
+          const values = Array.isArray(records[type]) ? records[type] : []
+          return (
+            <article key={type}>
+              <div>
+                <strong>{type}</strong>
+                <span>{values.length}</span>
+              </div>
+              <ChipList
+                values={values.slice(0, 8).map((value) =>
+                  typeof value === 'object' ? JSON.stringify(value) : String(value),
+                )}
+                empty={`No ${type} records`}
+                limit={8}
+              />
+            </article>
+          )
+        })}
+      </div>
+    </Section>
+  )
+}
+
+function WhoisSection({ collector }: { collector?: CollectorResult }) {
+  const data = collector?.data ?? {}
+  const fields = [
+    ['Registrar', data.registrar],
+    ['Created', data.creation_date],
+    ['Updated', data.updated_date],
+    ['Expires', data.expiration_date],
+  ]
+  return (
+    <Section
+      eyebrow="Registration metadata"
+      title="WHOIS"
+      meta={<StatusBadge status={collector?.status ?? 'skipped'} />}
+    >
+      <SourceState collector={collector} />
+      <dl className="definition-grid">
+        {fields.map(([label, value]) => (
+          <div key={String(label)}>
+            <dt>{String(label)}</dt>
+            <dd>
+              {String(label) === 'Registrar'
+                ? String(value ?? 'Not available')
+                : formatDate(typeof value === 'string' ? value : null, true)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="subsection">
+        <h3>Nameservers</h3>
+        <ChipList values={asStrings(data.name_servers)} />
+      </div>
+    </Section>
+  )
+}
+
+function CertificateSection({ collector }: { collector?: CollectorResult }) {
+  const data = collector?.data ?? {}
+  const subdomains = asStrings(data.subdomains)
+  const certificates = asObjects(data.certificates)
+  return (
+    <Section
+      eyebrow="Public certificate records"
+      title="Certificate Transparency"
+      meta={
+        <span className="section-count">
+          {certificates.length.toLocaleString()} certificates
+        </span>
+      }
+    >
+      <SourceState collector={collector} />
+      <div className="split-content">
+        <div>
+          <h3>Observed subdomains</h3>
+          <ChipList values={subdomains} limit={24} />
+        </div>
+        <div>
+          <h3>Recent certificate sample</h3>
+          <div className="compact-list">
+            {certificates.slice(0, 6).map((certificate, index) => (
+              <div key={`${String(certificate.serial_number)}-${index}`}>
+                <strong>
+                  {String(certificate.common_name ?? 'Unnamed certificate')}
+                </strong>
+                <span>{formatDate(String(certificate.not_before ?? ''), true)}</span>
+              </div>
+            ))}
+            {!certificates.length ? <p className="muted">No certificates returned.</p> : null}
+          </div>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+function WaybackSection({ collector }: { collector?: CollectorResult }) {
+  const data = collector?.data ?? {}
+  const captures = asObjects(data.captures)
+  return (
+    <Section
+      eyebrow="Historical web evidence"
+      title="Wayback"
+      meta={
+        <span className="section-count">
+          {captures.length.toLocaleString()} captures
+        </span>
+      }
+    >
+      <SourceState collector={collector} />
+      <div className="compact-list capture-list">
+        {captures.slice(0, 8).map((capture, index) => (
+          <div key={`${String(capture.timestamp)}-${index}`}>
+            <strong>{String(capture.url ?? 'Archived URL')}</strong>
+            <span>
+              {formatDate(String(capture.timestamp ?? ''), true)} ·{' '}
+              {String(capture.mime_type ?? 'unknown type')}
+            </span>
+          </div>
+        ))}
+        {!captures.length ? <p className="muted">No archived captures returned.</p> : null}
+      </div>
+    </Section>
   )
 }
 
 function ShodanSection({ collector }: { collector?: CollectorResult }) {
-  const detail = collector?.error ?? collector?.error_details?.[0]
   const data = collector?.data ?? {}
-  const subdomains = Array.isArray(data.subdomains)
-    ? data.subdomains.filter((value): value is string => typeof value === 'string')
-    : []
-
+  const subdomains = asStrings(data.subdomains)
+  const tags = asStrings(data.tags)
   return (
-    <section className="panel report-section shodan-section">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">Optional passive source</p>
-          <h2>Shodan</h2>
-        </div>
-        <span className={`status ${collector?.status ?? 'skipped'}`}>
-          {collector?.status ?? 'not run'}
-        </span>
-      </div>
-      {collector?.status === 'skipped' ? (
-        <p className="integration-notice">Optional API key not configured</p>
-      ) : null}
-      {collector?.status === 'error' && detail ? (
-        <div className="source-error">
-          <strong>{errorLabels[detail.category] ?? 'Collector error'}</strong>
-          <span>Raw details are included below.</span>
-        </div>
-      ) : null}
+    <Section
+      eyebrow="Optional passive source"
+      title="Shodan"
+      meta={<StatusBadge status={collector?.status ?? 'skipped'} />}
+    >
+      <SourceState collector={collector} />
       {collector?.status === 'ok' ? (
         <>
-          <div className="shodan-counts">
+          <div className="mini-metrics">
             <div>
               <span>Subdomains</span>
               <strong>{subdomains.length.toLocaleString()}</strong>
             </div>
             <div>
-              <span>Records</span>
-              <strong>
-                {(typeof data.record_count === 'number'
-                  ? data.record_count
-                  : 0
-                ).toLocaleString()}
-              </strong>
+              <span>DNS records</span>
+              <strong>{Number(data.record_count ?? 0).toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>Tags</span>
+              <strong>{tags.length.toLocaleString()}</strong>
             </div>
           </div>
-          <div className="shodan-preview">
-            <h3>Subdomain preview</h3>
-            {subdomains.length ? (
-              <ul>
-                {subdomains.slice(0, 10).map((subdomain) => (
-                  <li key={subdomain}>{subdomain}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="muted">No subdomains returned.</p>
-            )}
+          <div className="subsection">
+            <h3>Observed names</h3>
+            <ChipList values={subdomains} />
           </div>
         </>
       ) : null}
-      <details>
-        <summary>View raw Shodan JSON</summary>
-        <pre>{JSON.stringify(collector ?? {}, null, 2)}</pre>
-      </details>
-    </section>
+    </Section>
+  )
+}
+
+function CensysSection({ collector }: { collector?: CollectorResult }) {
+  const data = collector?.data ?? {}
+  const hosts = Array.isArray(data.hosts) ? (data.hosts as CensysHost[]) : []
+  const ports = Array.isArray(data.ports) ? (data.ports as number[]) : []
+  const protocols = asStrings(data.protocols)
+  const organizations = asStrings(data.organizations)
+  const locations = asStrings(data.locations)
+  return (
+    <Section
+      eyebrow="DNS-derived host intelligence"
+      title="Censys Host Intelligence"
+      meta={<StatusBadge status={collector?.status ?? 'skipped'} />}
+      className="censys-section"
+    >
+      <SourceState collector={collector} />
+      {collector?.status === 'ok' || hosts.length ? (
+        <>
+          <div className="mini-metrics four">
+            <div>
+              <span>Hosts</span>
+              <strong>{Number(data.host_count ?? hosts.length).toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>Services</span>
+              <strong>{Number(data.service_count ?? 0).toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>Ports</span>
+              <strong>{ports.length.toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>ASNs</span>
+              <strong>
+                {(Array.isArray(data.asns) ? data.asns.length : 0).toLocaleString()}
+              </strong>
+            </div>
+          </div>
+          <div className="censys-facts">
+            <div>
+              <h3>Observed ports</h3>
+              <ChipList values={ports} />
+            </div>
+            <div>
+              <h3>Protocols</h3>
+              <ChipList values={protocols} />
+            </div>
+            <div>
+              <h3>ASN and organizations</h3>
+              <ChipList values={organizations} />
+            </div>
+            <div>
+              <h3>Locations</h3>
+              <ChipList values={locations} />
+            </div>
+          </div>
+          <div className="host-grid">
+            {hosts.map((host) => {
+              const location = [host.location?.city, host.location?.country_code]
+                .filter(Boolean)
+                .join(', ')
+              return (
+                <article className="host-card" key={host.ip}>
+                  <div className="host-heading">
+                    <div>
+                      <span>Host</span>
+                      <h3>{host.ip}</h3>
+                    </div>
+                    <span>{host.service_count} services</span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Network</dt>
+                      <dd>
+                        {host.autonomous_system?.name ??
+                          host.whois?.organization ??
+                          'Unknown'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>ASN</dt>
+                      <dd>
+                        {host.autonomous_system?.asn
+                          ? `AS${host.autonomous_system.asn}`
+                          : 'Unknown'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Location</dt>
+                      <dd>{location || 'Unknown'}</dd>
+                    </div>
+                  </dl>
+                  <div className="service-list">
+                    {host.services.slice(0, 8).map((service, index) => (
+                      <div key={`${service.port}-${service.protocol}-${index}`}>
+                        <strong>{service.port ?? '—'}</strong>
+                        <span>
+                          {service.service_name ?? service.protocol ?? 'Unknown service'}
+                        </span>
+                        <small>{service.transport_protocol ?? '—'}</small>
+                      </div>
+                    ))}
+                    {!host.services.length ? (
+                      <p className="muted">No services returned.</p>
+                    ) : null}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        </>
+      ) : null}
+    </Section>
+  )
+}
+
+function RawEvidence({ report }: { report: Report }) {
+  return (
+    <Section eyebrow="Normalized source output" title="Raw Evidence">
+      <div className="raw-evidence">
+        {Object.values(report.collectors).map((collector) => (
+          <details key={collector.source}>
+            <summary>
+              <span>{collector.source}</span>
+              <StatusBadge status={collector.status} />
+            </summary>
+            <pre>{JSON.stringify(collector, null, 2)}</pre>
+          </details>
+        ))}
+        <details>
+          <summary>
+            <span>Complete report</span>
+            <StatusBadge status="json">JSON</StatusBadge>
+          </summary>
+          <pre>{JSON.stringify(report, null, 2)}</pre>
+        </details>
+      </div>
+    </Section>
   )
 }
 
@@ -283,7 +686,7 @@ function App() {
       const response = await api.get<Report>(`/api/scans/${scanId}/report`)
       setReport(response.data)
     } catch {
-      setError('The scan report could not be loaded.')
+      setError('The selected report could not be loaded.')
     } finally {
       setLoading(false)
     }
@@ -295,17 +698,22 @@ function App() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    const normalizedTarget = target.trim().toLowerCase()
+    if (!normalizedTarget) {
+      setError('Enter a domain such as example.com.')
+      return
+    }
     setLoading(true)
     setError('')
     try {
       const response = await api.post<{ scan_id: number }>('/api/scans', {
-        target,
+        target: normalizedTarget,
       })
       await Promise.all([loadReport(response.data.scan_id), loadScans()])
       setTarget('')
     } catch (requestError) {
       if (axios.isAxiosError(requestError) && requestError.response?.status === 422) {
-        setError('Enter a valid domain such as example.com.')
+        setError('Enter a valid domain without a URL path or protocol.')
       } else {
         setError('The passive scan could not be completed.')
       }
@@ -313,57 +721,54 @@ function App() {
     }
   }
 
+  const summaryMetrics = report
+    ? [
+        ['DNS addresses', report.summary.a_count + report.summary.aaaa_count, 'A + AAAA'],
+        ['Certificates', report.summary.certificate_count, 'public records'],
+        ['Subdomains', report.summary.subdomain_count, 'CT observations'],
+        ['Archive captures', report.summary.wayback_capture_count, 'historical URLs'],
+        ['Censys hosts', report.summary.censys_host_count ?? 0, 'DNS-derived'],
+        ['Censys services', report.summary.censys_service_count ?? 0, 'observed'],
+      ]
+    : []
+
   return (
-    <main>
-      <header className="masthead">
-        <div>
-          <p className="eyebrow">Passive domain intelligence</p>
-          <h1>TraceLens</h1>
-        </div>
-        <span className="version">v0.3.0-alpha3</span>
-      </header>
-
-      <section className="panel scan-form">
-        <div>
-          <h2>Start a scan</h2>
-          <p>Collect public DNS, registration, certificate, and archive data.</p>
-        </div>
-        <form onSubmit={submit}>
-          <label htmlFor="target">Domain</label>
-          <div className="input-row">
-            <input
-              id="target"
-              value={target}
-              onChange={(event) => setTarget(event.target.value)}
-              placeholder="example.com"
-              autoComplete="off"
-              required
-            />
-            <button type="submit" disabled={loading}>
-              {loading ? 'Collecting…' : 'Run passive scan'}
-            </button>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">TL</span>
+          <div>
+            <strong>TraceLens</strong>
+            <span>Intelligence Console</span>
           </div>
-        </form>
-        {error ? <p className="notice">{error}</p> : null}
-      </section>
-
-      <div className="layout">
-        <aside className="panel recent">
-          <div className="recent-heading">
-            <h2>Recent scans</h2>
-            <span>{visibleScans.length} visible</span>
+        </div>
+        <div className="system-status">
+          <span />
+          Passive collection ready
+        </div>
+        <nav aria-label="Report sections">
+          <a href="#overview">Overview</a>
+          <a href="#intelligence">Intelligence</a>
+          <a href="#timeline">Timeline</a>
+          <a href="#evidence">Raw evidence</a>
+        </nav>
+        <div className="recent-header">
+          <div>
+            <span>Investigation history</span>
+            <strong>Recent scans</strong>
           </div>
-          <label htmlFor="scan-search">Search</label>
+          <span>{visibleScans.length}</span>
+        </div>
+        <div className="scan-filters">
           <input
-            id="scan-search"
+            aria-label="Search scans by target"
             type="search"
             value={scanFilter}
             onChange={(event) => setScanFilter(event.target.value)}
-            placeholder="Filter by target"
+            placeholder="Search target"
           />
-          <label htmlFor="status-filter">Status</label>
           <select
-            id="status-filter"
+            aria-label="Filter scans by status"
             value={statusFilter}
             onChange={(event) => setStatusFilter(event.target.value)}
           >
@@ -373,176 +778,252 @@ function App() {
             <option value="failed">Failed</option>
             <option value="running">Running</option>
           </select>
-          {scans.length === 0 ? <p>No scans stored yet.</p> : null}
-          {scans.length > 0 && visibleScans.length === 0 ? (
-            <p>No scans match the current filters.</p>
+        </div>
+        <div className="scan-list">
+          {visibleScans.map((scan) => (
+            <button
+              type="button"
+              className={report?.scan_id === scan.scan_id ? 'active' : ''}
+              key={scan.scan_id}
+              onClick={() => loadReport(scan.scan_id)}
+            >
+              <span className={`scan-dot ${scan.status}`} />
+              <span>
+                <strong>{scan.target}</strong>
+                <small>{formatDate(scan.created_at, true)}</small>
+              </span>
+              <small>#{scan.scan_id}</small>
+            </button>
+          ))}
+          {!visibleScans.length ? (
+            <p>{scans.length ? 'No scans match these filters.' : 'No scans stored yet.'}</p>
           ) : null}
-          <ul>
-            {visibleScans.map((scan) => (
-              <li key={scan.scan_id}>
-                <button type="button" onClick={() => loadReport(scan.scan_id)}>
-                  <strong>{scan.target}</strong>
-                  <span>
-                    {scan.status} · {formatDate(scan.created_at)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
+        </div>
+        <span className="version">v0.4.0-alpha4</span>
+      </aside>
 
-        <div className="results">
-          {report ? (
-            <>
-              <section className="panel report-header">
-                <div>
-                  <p className="eyebrow">Scan #{report.scan_id}</p>
-                  <h2>{report.target}</h2>
-                </div>
-                <div className="report-actions">
-                  <span className={`status ${report.status}`}>{report.status}</span>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => downloadReport(report)}
-                  >
-                    Download JSON
-                  </button>
-                </div>
-              </section>
+      <main className="workspace">
+        <header className="workspace-header">
+          <div>
+            <p className="eyebrow">Passive-first domain intelligence</p>
+            <h1>Investigation workspace</h1>
+          </div>
+          <div className="workspace-state">
+            <span>{loading ? 'Collection in progress' : 'Console online'}</span>
+            <i className={loading ? 'working' : ''} />
+          </div>
+        </header>
 
-              {report.status === 'partial' ? (
-                <p className="partial-explanation">
-                  Some external sources were unavailable. Existing results are still valid.
+        <section className="scan-command panel">
+          <div>
+            <span className="command-icon">⌕</span>
+            <div>
+              <h2>Start a passive investigation</h2>
+              <p>
+                Collect public DNS, registration, certificate, archive, and
+                optional host intelligence. No direct infrastructure scanning.
+              </p>
+            </div>
+          </div>
+          <form onSubmit={submit}>
+            <input
+              aria-label="Domain target"
+              value={target}
+              onChange={(event) => setTarget(event.target.value)}
+              placeholder="example.com"
+              autoComplete="off"
+              disabled={loading}
+            />
+            <button type="submit" disabled={loading}>
+              {loading ? <span className="spinner" /> : null}
+              {loading ? 'Collecting' : 'Run scan'}
+            </button>
+          </form>
+          {error ? <p className="form-error">{error}</p> : null}
+        </section>
+
+        {report ? (
+          <div className="report">
+            <section className="report-title" id="overview">
+              <div>
+                <div className="report-kicker">
+                  <span>Scan #{report.scan_id}</span>
+                  <StatusBadge status={report.status} />
+                </div>
+                <h2>{report.target}</h2>
+                <p>
+                  Completed {formatDate(report.completed_at)} ·{' '}
+                  {Object.keys(report.collectors).length} sources evaluated
                 </p>
-              ) : null}
+              </div>
+              <button
+                type="button"
+                className="export-button"
+                onClick={() => downloadReport(report)}
+              >
+                <span>↓</span> Download JSON
+              </button>
+            </section>
 
-              <section className="summary-grid" aria-label="Report summary">
-                {summaryCards(report.summary).map(([label, value]) => (
-                  <article className="panel summary-card" key={label}>
-                    <span>{label}</span>
-                    <strong>{value}</strong>
+            {report.status === 'partial' ? (
+              <div className="partial-explanation">
+                <strong>Partial source coverage</strong>
+                <span>
+                  One or more external sources returned an error. Successful
+                  collector evidence remains available below.
+                </span>
+              </div>
+            ) : null}
+
+            <section className="metric-grid" aria-label="Report summary">
+              {summaryMetrics.map(([label, value, note]) => (
+                <article className="metric-card" key={String(label)}>
+                  <span>{label}</span>
+                  <strong>{Number(value).toLocaleString()}</strong>
+                  <small>{note}</small>
+                </article>
+              ))}
+            </section>
+
+            <Section
+              eyebrow="Source operations"
+              title="Collector Health"
+              meta={
+                <span className="section-count">
+                  {Object.values(report.collectors).filter(
+                    (collector) => collector.status === 'ok',
+                  ).length}{' '}
+                  healthy
+                </span>
+              }
+            >
+              <div className="collector-grid">
+                {Object.values(report.collectors).map((collector) => {
+                  const detail = collector.error ?? collector.error_details?.[0]
+                  return (
+                    <article key={collector.source}>
+                      <div>
+                        <span className={`collector-icon ${collector.status}`}>
+                          {collector.status === 'ok'
+                            ? '✓'
+                            : collector.status === 'skipped'
+                              ? '–'
+                              : '!'}
+                        </span>
+                        <strong>{collector.source}</strong>
+                      </div>
+                      <StatusBadge status={collector.status} />
+                      <small>
+                        {collector.status === 'ok'
+                          ? 'Source completed normally'
+                          : collector.status === 'skipped'
+                            ? collector.errors[0] ?? 'Optional source skipped'
+                            : errorLabels[detail?.category ?? ''] ?? 'Collector error'}
+                      </small>
+                    </article>
+                  )
+                })}
+              </div>
+            </Section>
+
+            <Section
+              eyebrow="Evidence-backed assessment"
+              title="Analyst Notes"
+              meta={
+                <span className="section-count">{report.insights.length} findings</span>
+              }
+            >
+              <div className="insight-list">
+                {report.insights.map((insight, index) => (
+                  <article
+                    className={`insight ${insight.severity}`}
+                    key={`${insight.title}-${index}`}
+                  >
+                    <span className="insight-marker">
+                      {insight.severity === 'warning'
+                        ? '!'
+                        : insight.severity === 'notice'
+                          ? '◆'
+                          : 'i'}
+                    </span>
+                    <div>
+                      <span className="insight-source">{insight.type}</span>
+                      <h3>{insight.title}</h3>
+                      <p>{insight.description}</p>
+                      <div className="evidence-chips">
+                        {insight.evidence.slice(0, 8).map((evidence, evidenceIndex) => (
+                          <span key={`${evidenceLabel(evidence)}-${evidenceIndex}`}>
+                            {evidenceLabel(evidence)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
                   </article>
                 ))}
-              </section>
-
-              <section className="panel report-section">
-                <div className="section-heading">
-                  <div>
-                    <p className="eyebrow">Source status</p>
-                    <h2>Collector health</h2>
-                  </div>
-                </div>
-                <div className="collector-grid">
-                  {Object.values(report.collectors).map((collector) => {
-                    const detail = collector.error ?? collector.error_details?.[0]
-                    return (
-                      <div key={collector.source}>
-                        <span>{collector.source}</span>
-                        <span className={`status ${collector.status}`}>
-                          {collector.status}
-                        </span>
-                        {collector.status === 'skipped' ? (
-                          <small>Optional API key not configured</small>
-                        ) : detail ? (
-                          <small>{errorLabels[detail.category] ?? 'Collector error'}</small>
-                        ) : (
-                          <small>Source completed normally</small>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              </section>
-
-              <section className="panel report-section">
-                <div className="section-heading">
-                  <div>
-                    <p className="eyebrow">Evidence-backed findings</p>
-                    <h2>Insights</h2>
-                  </div>
-                  <span>{report.insights.length} findings</span>
-                </div>
-                {report.insights.length ? (
-                  <div className="insight-list">
-                    {report.insights.map((insight) => (
-                      <article className={`insight ${insight.severity}`} key={insight.title}>
-                        <span>{insight.severity}</span>
-                        <div>
-                          <h3>{insight.title}</h3>
-                          <p>{insight.description}</p>
-                          <details>
-                            <summary>View evidence</summary>
-                            <pre>{JSON.stringify(insight.evidence, null, 2)}</pre>
-                          </details>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
+                {!report.insights.length ? (
                   <p className="muted">No deterministic insights were identified.</p>
-                )}
-              </section>
+                ) : null}
+              </div>
+            </Section>
 
+            <div id="intelligence" className="intelligence-stack">
+              <DomainOverview report={report} />
+              <DnsSection collector={report.collectors.dns} />
+              <WhoisSection collector={report.collectors.whois} />
+              <CertificateSection collector={report.collectors.crtsh} />
+              <WaybackSection collector={report.collectors.wayback} />
               <ShodanSection collector={report.collectors.shodan} />
+              <CensysSection collector={report.collectors.censys} />
+            </div>
 
-              <section className="panel report-section">
-                <div className="section-heading">
-                  <div>
-                    <p className="eyebrow">Chronology</p>
-                    <h2>Timeline</h2>
-                  </div>
-                  <span>{report.timeline.length} events</span>
-                </div>
+            <div id="timeline">
+              <Section
+                eyebrow="Observed chronology"
+                title="Timeline"
+                meta={
+                  <span className="section-count">
+                    {report.timeline.length} events
+                  </span>
+                }
+              >
                 <ol className="timeline">
                   {displayTimeline.map((event, index) => (
                     <li key={`${event.type}-${event.timestamp}-${index}`}>
-                      <time>
-                        {formatDate(event.timestamp)}
-                        {event.endTimestamp ? ` – ${formatDate(event.endTimestamp)}` : ''}
-                      </time>
-                      <strong>{event.label}</strong>
-                      <span>{event.detail ?? event.source}</span>
+                      <span className={`timeline-node ${event.source}`} />
+                      <div className="timeline-date">
+                        <time>{formatDate(event.timestamp, true)}</time>
+                        {event.endTimestamp ? (
+                          <small>to {formatDate(event.endTimestamp, true)}</small>
+                        ) : null}
+                      </div>
+                      <div>
+                        <span className="source-badge">{event.source}</span>
+                        <strong>{event.label}</strong>
+                        <p>{event.detail ?? 'Source observation recorded'}</p>
+                      </div>
                     </li>
                   ))}
                 </ol>
-              </section>
+              </Section>
+            </div>
 
-              <section className="raw-sections">
-                <div className="section-heading raw-heading">
-                  <div>
-                    <p className="eyebrow">Source evidence</p>
-                    <h2>Detailed data</h2>
-                  </div>
-                </div>
-                <DataSection title="DNS" collector={report.collectors.dns} />
-                <DataSection title="WHOIS" collector={report.collectors.whois} />
-                <DataSection
-                  title="Certificate Transparency"
-                  collector={report.collectors.crtsh}
-                />
-                <DataSection
-                  title="Wayback Machine"
-                  collector={report.collectors.wayback}
-                />
-                <details className="panel report-section">
-                  <summary>
-                    <span>Raw report</span>
-                    <span className="status">JSON</span>
-                  </summary>
-                  <pre>{JSON.stringify(report, null, 2)}</pre>
-                </details>
-              </section>
-            </>
-          ) : (
-            <section className="panel empty-state">
-              <h2>No report selected</h2>
-              <p>Run a passive scan or choose a stored scan.</p>
-            </section>
-          )}
-        </div>
-      </div>
-    </main>
+            <div id="evidence">
+              <RawEvidence report={report} />
+            </div>
+          </div>
+        ) : (
+          <section className="empty-state panel">
+            <span className="empty-mark">◎</span>
+            <p className="eyebrow">Investigation workspace</p>
+            <h2>No report selected</h2>
+            <p>
+              Run a passive domain scan or select a previous investigation from
+              the sidebar.
+            </p>
+          </section>
+        )}
+      </main>
+    </div>
   )
 }
 

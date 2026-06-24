@@ -17,7 +17,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.database.create_tables()
         yield
 
-    app = FastAPI(title="TraceLens", version="0.2.0-alpha2", lifespan=lifespan)
+    app = FastAPI(title="TraceLens", version="0.4.0-alpha4", lifespan=lifespan)
     app.state.settings = resolved_settings
     app.state.database = Database(resolved_settings)
     app.add_middleware(

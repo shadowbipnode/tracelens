@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from backend.collectors import crtsh, dns, shodan, wayback, whois
+from backend.collectors import censys, crtsh, dns, shodan, wayback, whois
 from backend.config import Settings
 from backend.models.report import CollectorResult
 
@@ -192,8 +192,8 @@ def test_shodan_parses_passive_domain_response(monkeypatch):
 @pytest.mark.parametrize(
     ("status_code", "category"),
     [
-        (401, "bad_response"),
-        (403, "bad_response"),
+        (401, "invalid_credentials"),
+        (403, "forbidden"),
         (429, "rate_limited"),
         (500, "unavailable"),
         (503, "unavailable"),
@@ -233,3 +233,170 @@ def test_shodan_timeout_is_structured(monkeypatch):
 
     assert result["status"] == "error"
     assert result["error"]["category"] == "timeout"
+
+
+def test_censys_skips_when_token_is_missing():
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="", _env_file=None),
+        context={"dns": {"data": {"records": {"A": ["192.0.2.10"]}}}},
+    )
+
+    assert_structure(result, "censys")
+    assert result["status"] == "skipped"
+    assert result["data"]["reason"] == "not_configured"
+    assert result["error"]["category"] == "not_configured"
+
+
+def test_censys_skips_when_dns_has_no_addresses():
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="token", _env_file=None),
+        context={"dns": {"data": {"records": {"MX": []}}}},
+    )
+
+    assert_structure(result, "censys")
+    assert result["status"] == "skipped"
+    assert result["data"]["reason"] == "no_ip_addresses"
+    assert result["error"]["category"] == "no_ip_addresses"
+
+
+def test_censys_parses_host_response(monkeypatch):
+    payload = {
+        "result": {
+            "resource": {
+                "ip": "192.0.2.10",
+                "location": {
+                    "country": "Italy",
+                    "country_code": "IT",
+                    "city": "Rome",
+                },
+                "autonomous_system": {
+                    "asn": 64500,
+                    "name": "Example Cloud",
+                    "description": "Example Cloud Network",
+                    "bgp_prefix": "192.0.2.0/24",
+                    "country_code": "IT",
+                },
+                "whois": {
+                    "organization": "Example Hosting",
+                    "network": {"name": "EXAMPLE-NET"},
+                },
+                "services": [
+                    {
+                        "port": 443,
+                        "protocol": "HTTP",
+                        "transport_protocol": "TCP",
+                        "scan_time": "2026-06-20T10:00:00Z",
+                        "service_name": "HTTPS",
+                        "tls": {
+                            "certificates": {
+                                "leaf_data": {
+                                    "names": [
+                                        "example.com",
+                                        "www.example.com",
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                ],
+            }
+        }
+    }
+    monkeypatch.setattr(
+        censys.httpx,
+        "get",
+        lambda *args, **kwargs: Response(payload),
+    )
+
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="token", _env_file=None),
+        context={"dns": {"data": {"records": {"A": ["192.0.2.10"]}}}},
+    )
+
+    assert_structure(result, "censys")
+    assert result["status"] == "ok"
+    assert result["data"]["host_count"] == 1
+    assert result["data"]["service_count"] == 1
+    assert result["data"]["ports"] == [443]
+    assert result["data"]["protocols"] == ["HTTP"]
+    assert result["data"]["asns"] == [64500]
+    assert result["data"]["hosts"][0]["services"][0][
+        "tls_certificate_names"
+    ] == ["example.com", "www.example.com"]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "category"),
+    [
+        (401, "invalid_credentials"),
+        (403, "plan_restricted"),
+        (429, "rate_limited"),
+        (500, "unavailable"),
+        (503, "unavailable"),
+    ],
+)
+def test_censys_http_errors_are_structured(
+    monkeypatch, status_code, category
+):
+    def fail(*args, **kwargs):
+        request = httpx.Request(
+            "GET",
+            "https://api.platform.censys.io/v3/global/asset/host/192.0.2.10",
+        )
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"Censys returned {status_code}",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(censys.httpx, "get", fail)
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="token", _env_file=None),
+        context={"dns": {"data": {"records": {"A": ["192.0.2.10"]}}}},
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == category
+    assert result["error"]["ip"] == "192.0.2.10"
+
+
+def test_censys_timeout_is_structured(monkeypatch):
+    monkeypatch.setattr(
+        censys.httpx,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            httpx.ReadTimeout("Censys timed out")
+        ),
+    )
+
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="token", _env_file=None),
+        context={"dns": {"data": {"records": {"A": ["192.0.2.10"]}}}},
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == "timeout"
+
+
+@pytest.mark.parametrize("payload", [["unexpected"], {"result": {"total": 1}}])
+def test_censys_invalid_payload_is_parse_error(monkeypatch, payload):
+    monkeypatch.setattr(
+        censys.httpx,
+        "get",
+        lambda *args, **kwargs: Response(payload),
+    )
+
+    result = censys.collect_censys(
+        "example.com",
+        Settings(CENSYS_API_TOKEN="token", _env_file=None),
+        context={"dns": {"data": {"records": {"A": ["192.0.2.10"]}}}},
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == "parse_error"

@@ -6,6 +6,7 @@ TIMELINE_LABELS = {
     "whois_created": "Domain registered",
     "whois_updated": "WHOIS updated",
     "certificate_observed": "Certificate observed",
+    "censys_service_observed": "Censys service observed",
     "wayback_first_seen": "Wayback first seen",
     "scan_started": "Scan started",
     "scan_completed": "Scan completed",
@@ -55,6 +56,7 @@ def build_summary(
     crtsh_data = collectors.get("crtsh", {}).get("data", {})
     wayback_data = collectors.get("wayback", {}).get("data", {})
     shodan_data = collectors.get("shodan", {}).get("data", {})
+    censys_data = collectors.get("censys", {}).get("data", {})
 
     dated_events = [
         event
@@ -108,6 +110,10 @@ def build_summary(
             "record_count",
             len(shodan_records) if isinstance(shodan_records, list) else 0,
         ),
+        "censys_host_count": censys_data.get("host_count", 0),
+        "censys_service_count": censys_data.get("service_count", 0),
+        "censys_asn_count": len(censys_data.get("asns", [])),
+        "censys_port_count": len(censys_data.get("ports", [])),
         "first_seen": first_seen,
         "last_updated": whois_data.get("updated_date"),
     }
@@ -258,6 +264,124 @@ def build_shodan_insights(
     return []
 
 
+def build_censys_insights(
+    collectors: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    collector = collectors.get("censys")
+    if not collector:
+        return []
+
+    status = collector.get("status")
+    data = collector.get("data", {})
+    details = collector.get("error_details", [])
+    errors = collector.get("errors", [])
+    insights: List[Dict[str, Any]] = []
+
+    def add(
+        title: str,
+        description: str,
+        evidence: List[Any],
+        severity: str = "info",
+    ) -> None:
+        if evidence:
+            insights.append(
+                {
+                    "type": "censys",
+                    "severity": severity,
+                    "title": title,
+                    "description": description,
+                    "evidence": evidence,
+                }
+            )
+
+    if status == "skipped":
+        reason = data.get("reason") or (
+            details[0].get("category") if details else None
+        )
+        if reason == "no_ip_addresses":
+            add(
+                "Censys skipped because no IPs were available",
+                "DNS did not return A or AAAA records for passive host lookup.",
+                details or errors,
+                "notice",
+            )
+        else:
+            add(
+                "Censys skipped because no token was configured",
+                "Optional Censys host intelligence was not requested.",
+                details or errors,
+                "notice",
+            )
+        return insights
+
+    if status == "error" and not data.get("hosts"):
+        add(
+            "Censys host intelligence unavailable",
+            "Censys could not return passive host intelligence for discovered DNS addresses.",
+            details or errors,
+            "warning",
+        )
+        return insights
+
+    host_count = data.get("host_count", 0)
+    service_count = data.get("service_count", 0)
+    if host_count:
+        add(
+            "Censys host intelligence available",
+            "Censys returned normalized host metadata for DNS-discovered addresses.",
+            [
+                {
+                    "host_count": host_count,
+                    "asns": data.get("asns", []),
+                    "locations": data.get("locations", []),
+                }
+            ],
+        )
+    if service_count:
+        add(
+            "Exposed services observed by Censys",
+            "Censys observations include network services associated with discovered addresses.",
+            [
+                {
+                    "service_count": service_count,
+                    "ports": data.get("ports", []),
+                    "protocols": data.get("protocols", []),
+                }
+            ],
+            "notice",
+        )
+    if len(data.get("asns", [])) > 1:
+        add(
+            "Multiple ASNs observed",
+            "DNS-discovered addresses are announced by more than one autonomous system.",
+            data.get("asns", []),
+            "notice",
+        )
+
+    providers = (
+        "cloudflare",
+        "akamai",
+        "fastly",
+        "amazon",
+        "aws",
+        "google",
+        "microsoft",
+        "azure",
+    )
+    infrastructure = [
+        organization
+        for organization in data.get("organizations", [])
+        if any(provider in str(organization).lower() for provider in providers)
+    ]
+    if infrastructure:
+        add(
+            "Cloud/CDN infrastructure detected",
+            "Censys organization and ASN metadata indicates major cloud or CDN infrastructure.",
+            infrastructure,
+        )
+    return insights
+
+
 def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
     timeline = report.get("timeline", [])
     for event in timeline:
@@ -280,5 +404,6 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
     report["insights"] = [
         *build_dns_insights(collectors),
         *build_shodan_insights(collectors),
+        *build_censys_insights(collectors),
     ]
     return report

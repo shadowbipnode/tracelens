@@ -24,9 +24,13 @@ def classify_collector_error(error: Exception) -> Dict[str, Any]:
         status_code = error.response.status_code
         if status_code == 408:
             category = "timeout"
+        elif status_code == 401:
+            category = "invalid_credentials"
+        elif status_code == 403:
+            category = "forbidden"
         elif status_code == 429:
             category = "rate_limited"
-        elif status_code in {500, 502, 503, 504}:
+        elif 500 <= status_code <= 599:
             category = "unavailable"
         else:
             category = "bad_response"
