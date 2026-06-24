@@ -12,6 +12,7 @@ URL_LIMIT = 500
 def collect_wayback(target: str, settings: Settings) -> Dict[str, Any]:
     started_at = iso_now()
     try:
+        timeout = httpx.Timeout(max(settings.http_timeout, 45.0), connect=10.0)
         response = httpx.get(
             "https://web.archive.org/cdx/search/cdx",
             params={
@@ -19,10 +20,12 @@ def collect_wayback(target: str, settings: Settings) -> Dict[str, Any]:
                 "output": "json",
                 "fl": "timestamp,original,statuscode,mimetype",
                 "collapse": "urlkey",
-                "limit": URL_LIMIT,
+                "limit": str(URL_LIMIT),
+                "filter": "statuscode:200",
             },
             headers={"User-Agent": settings.user_agent},
-            timeout=settings.http_timeout,
+            timeout=timeout,
+            follow_redirects=True,
         )
         response.raise_for_status()
         payload = response.json()
@@ -35,6 +38,7 @@ def collect_wayback(target: str, settings: Settings) -> Dict[str, Any]:
             "statuscode",
             "mimetype",
         ] else payload
+
         captures: List[Dict[str, Any]] = []
         seen: Set[Tuple[str, str]] = set()
 

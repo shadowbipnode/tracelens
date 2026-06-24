@@ -16,27 +16,49 @@ def _covered_names(value: Any) -> List[str]:
     return [name.strip().lower() for name in str(value).splitlines() if name.strip()]
 
 
+def _fetch_crtsh(target: str, settings: Settings) -> List[Dict[str, Any]]:
+    queries = [f"%.{target}", target]
+    last_error: Exception | None = None
+
+    with httpx.Client(
+        headers={"User-Agent": settings.user_agent},
+        timeout=httpx.Timeout(settings.http_timeout, connect=10.0),
+        follow_redirects=True,
+    ) as client:
+        for query in queries:
+            try:
+                response = client.get(
+                    "https://crt.sh/",
+                    params={"q": query, "output": "json"},
+                )
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                if not response.text.strip():
+                    return []
+                payload = response.json()
+                if isinstance(payload, list):
+                    return [item for item in payload if isinstance(item, dict)]
+                return []
+            except Exception as exc:
+                last_error = exc
+                continue
+
+    if last_error:
+        raise last_error
+    return []
+
+
 def collect_crtsh(target: str, settings: Settings) -> Dict[str, Any]:
     started_at = iso_now()
     try:
-        response = httpx.get(
-            "https://crt.sh/",
-            params={"q": f"%.{target}", "output": "json"},
-            headers={"User-Agent": settings.user_agent},
-            timeout=settings.http_timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ValueError("crt.sh returned an unexpected response")
+        payload = _fetch_crtsh(target, settings)
 
         certificates: List[Dict[str, Any]] = []
         subdomains: Set[str] = set()
         seen: Set[Tuple[Any, ...]] = set()
 
         for item in payload:
-            if not isinstance(item, dict):
-                continue
             certificate = {
                 "common_name": item.get("common_name"),
                 "name_value": item.get("name_value"),
