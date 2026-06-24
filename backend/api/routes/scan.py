@@ -9,6 +9,7 @@ from backend.config import Settings
 from backend.database import Database, Scan, utc_now
 from backend.models.target import ScanCreate
 from backend.orchestrator import parse_iso_datetime, run_passive_scan
+from backend.report_builder import enrich_report
 
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -107,4 +108,4 @@ def get_report(
         report = scan.report()
         if report is None:
             raise HTTPException(status_code=409, detail="Scan report is not available")
-        return report
+        return enrich_report(report)

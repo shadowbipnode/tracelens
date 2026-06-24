@@ -2,7 +2,12 @@ from typing import Any, Dict, List, Set, Tuple
 
 import httpx
 
-from backend.collectors.base import collector_result, error_result, iso_now
+from backend.collectors.base import (
+    CollectorParseError,
+    collector_result,
+    error_result,
+    iso_now,
+)
 from backend.config import Settings
 
 
@@ -20,29 +25,34 @@ def _fetch_crtsh(target: str, settings: Settings) -> List[Dict[str, Any]]:
     queries = [f"%.{target}", target]
     last_error: Exception | None = None
 
-    with httpx.Client(
-        headers={"User-Agent": settings.user_agent},
-        timeout=httpx.Timeout(settings.http_timeout, connect=10.0),
-        follow_redirects=True,
-    ) as client:
-        for query in queries:
-            try:
-                response = client.get(
-                    "https://crt.sh/",
-                    params={"q": query, "output": "json"},
-                )
-                if response.status_code == 404:
-                    continue
-                response.raise_for_status()
-                if not response.text.strip():
-                    return []
-                payload = response.json()
-                if isinstance(payload, list):
-                    return [item for item in payload if isinstance(item, dict)]
-                return []
-            except Exception as exc:
-                last_error = exc
+    for query in queries:
+        try:
+            response = httpx.get(
+                "https://crt.sh/",
+                params={"q": query, "output": "json"},
+                headers={"User-Agent": settings.user_agent},
+                timeout=httpx.Timeout(settings.http_timeout, connect=10.0),
+                follow_redirects=True,
+            )
+            if response.status_code == 404:
                 continue
+            response.raise_for_status()
+            if not response.text.strip():
+                return []
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise CollectorParseError("crt.sh returned invalid JSON") from exc
+            if isinstance(payload, list):
+                if any(not isinstance(item, dict) for item in payload):
+                    raise CollectorParseError(
+                        "crt.sh returned an unexpected payload shape"
+                    )
+                return payload
+            raise CollectorParseError("crt.sh returned an unexpected payload shape")
+        except Exception as exc:
+            last_error = exc
+            continue
 
     if last_error:
         raise last_error

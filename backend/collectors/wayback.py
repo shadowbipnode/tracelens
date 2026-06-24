@@ -2,7 +2,12 @@ from typing import Any, Dict, List, Set, Tuple
 
 import httpx
 
-from backend.collectors.base import collector_result, error_result, iso_now
+from backend.collectors.base import (
+    CollectorParseError,
+    collector_result,
+    error_result,
+    iso_now,
+)
 from backend.config import Settings
 
 
@@ -28,9 +33,16 @@ def collect_wayback(target: str, settings: Settings) -> Dict[str, Any]:
             follow_redirects=True,
         )
         response.raise_for_status()
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise CollectorParseError(
+                "Wayback Machine returned invalid JSON"
+            ) from exc
         if not isinstance(payload, list):
-            raise ValueError("Wayback Machine returned an unexpected response")
+            raise CollectorParseError(
+                "Wayback Machine returned an unexpected payload shape"
+            )
 
         rows = payload[1:] if payload and payload[0] == [
             "timestamp",
@@ -44,7 +56,9 @@ def collect_wayback(target: str, settings: Settings) -> Dict[str, Any]:
 
         for row in rows:
             if not isinstance(row, list) or len(row) < 4:
-                continue
+                raise CollectorParseError(
+                    "Wayback Machine returned an unexpected payload shape"
+                )
             timestamp, original, status_code, mime_type = row[:4]
             key = (str(timestamp), str(original))
             if key in seen:

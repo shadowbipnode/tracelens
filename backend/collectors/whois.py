@@ -3,7 +3,12 @@ from typing import Any, Dict, Iterable, Optional
 
 import whois
 
-from backend.collectors.base import collector_result, error_result, iso_now
+from backend.collectors.base import (
+    CollectorParseError,
+    collector_result,
+    error_result,
+    iso_now,
+)
 
 
 def _first(value: Any) -> Any:
@@ -36,6 +41,10 @@ def collect_whois(target: str) -> Dict[str, Any]:
     started_at = iso_now()
     try:
         result = whois.whois(target)
+        if not hasattr(result, "get"):
+            raise CollectorParseError(
+                "WHOIS returned an unexpected payload shape"
+            )
         data = {
             "registrar": _first(result.get("registrar")),
             "creation_date": _iso_date(result.get("creation_date")),

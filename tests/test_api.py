@@ -39,8 +39,13 @@ def test_create_list_and_retrieve_scan(client):
     assert report.json()["collectors"]["dns"]["data"]["records"]["A"] == [
         "93.184.216.34"
     ]
+    assert report.json()["summary"]["target"] == "example.com"
+    assert report.json()["summary"]["domain_age_years"] >= 30
+    assert report.json()["insights"] == []
     assert any(
-        event["type"] == "whois_created" for event in report.json()["timeline"]
+        event["type"] == "whois_created"
+        and event["label"] == "Domain registered"
+        for event in report.json()["timeline"]
     )
 
 

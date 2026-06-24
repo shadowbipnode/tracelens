@@ -1,7 +1,7 @@
 # TraceLens
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/shadowbipnode)
-![Status](https://img.shields.io/badge/status-M1%20complete-brightgreen)
+![Status](https://img.shields.io/badge/status-v0.2.0--alpha2-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
 ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)
@@ -9,9 +9,9 @@
 ![OSINT](https://img.shields.io/badge/OSINT-passive--first-purple)
 ![SQLite](https://img.shields.io/badge/database-SQLite-lightgrey)
 
-TraceLens is a passive-first domain intelligence application. It collects public information, normalizes source results, builds a basic timeline, and stores reports for later review.
+TraceLens is a passive-first domain intelligence application. It collects public information, normalizes source results, derives evidence-backed insights, builds an investigation timeline, and stores reports for later review.
 
-## M1 capabilities
+## v0.2.0-alpha2 capabilities
 
 - Validate and scan one domain at a time
 - Collect DNS records without subdomain brute forcing
@@ -20,7 +20,12 @@ TraceLens is a passive-first domain intelligence application. It collects public
 - Query archived URL metadata from the Wayback Machine
 - Continue scans when an individual collector fails
 - Store scan reports in SQLite
-- Browse recent scans and reports in a React dashboard
+- Review summary cards for registration, DNS, certificate, subdomain, and archive metrics
+- Review deterministic DNS insights with supporting evidence
+- Browse and filter recent scans in a React dashboard
+- See user-friendly collector error categories while retaining raw details
+- Review a simplified chronological timeline
+- Download the complete current report as JSON
 - Access scan metadata and normalized reports through FastAPI
 
 TraceLens does not perform port scanning, vulnerability scanning, brute forcing, credential collection, exploitation, or authenticated probing.
@@ -59,7 +64,23 @@ Available settings:
 ```text
 TRACELENS_DB_PATH=.tracelens/tracelens.sqlite3
 TRACELENS_HTTP_TIMEOUT=20
-TRACELENS_USER_AGENT=TraceLens/0.1
+TRACELENS_USER_AGENT=TraceLens/0.2
+```
+
+## Optional API Integrations
+
+TraceLens works without API keys. Future passive collectors may use optional third-party APIs such as Shodan, Censys, SecurityTrails, and Have I Been Pwned.
+
+If an API key is missing, the corresponding future collector will be skipped. Some providers are paid services or offer limited free tiers. No API key is required for current M1 or M2 local usage.
+
+The available optional variables are:
+
+```text
+SHODAN_API_KEY=
+CENSYS_API_ID=
+CENSYS_API_SECRET=
+SECURITYTRAILS_API_KEY=
+HIBP_API_KEY=
 ```
 
 ## Run locally
@@ -106,7 +127,7 @@ curl -X POST http://localhost:8000/api/scans \
   -d '{"target":"example.com"}'
 ```
 
-M1 executes collectors sequentially. Depending on source response times, creating a scan can take up to several collector timeout periods.
+Collectors execute sequentially. Depending on source response times, creating a scan can take up to several collector timeout periods.
 
 ## Tests
 
@@ -116,13 +137,14 @@ pytest -q
 
 cd frontend
 npm run build
+npm run lint
 ```
 
 External services are mocked in the test suite.
 
 ## Passive-first security model
 
-M1 only uses public DNS, WHOIS, certificate transparency, and web archive sources. It does not connect to target web services or enumerate target infrastructure through active probes. Each collector has a timeout, returns structured errors, and cannot terminate the remaining collection sequence.
+The current release only uses public DNS, WHOIS, certificate transparency, and web archive sources. It does not connect to target web services or enumerate target infrastructure through active probes. Each collector has a timeout, returns classified structured errors, and cannot terminate the remaining collection sequence.
 
 Use TraceLens only for lawful research and analysis.
 

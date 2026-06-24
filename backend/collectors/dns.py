@@ -3,7 +3,12 @@ from typing import Any, Dict, List
 import dns.exception
 import dns.resolver
 
-from backend.collectors.base import collector_result, error_result, iso_now
+from backend.collectors.base import (
+    classify_collector_error,
+    collector_result,
+    error_result,
+    iso_now,
+)
 
 
 RECORD_TYPES = ("A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA", "CAA")
@@ -47,6 +52,7 @@ def collect_dns(target: str) -> Dict[str, Any]:
     started_at = iso_now()
     records: Dict[str, List[Any]] = {}
     errors: List[str] = []
+    error_details: List[Dict[str, Any]] = []
     resolver = dns.resolver.Resolver()
 
     try:
@@ -61,13 +67,25 @@ def collect_dns(target: str) -> Dict[str, Any]:
             except dns.resolver.NXDOMAIN as exc:
                 return error_result("dns", started_at, exc)
             except (dns.exception.Timeout, dns.resolver.NoNameservers) as exc:
-                errors.append(f"{record_type}: {exc}")
+                detail = classify_collector_error(exc)
+                detail["message"] = f"{record_type}: {detail['message']}"
+                errors.append(detail["message"])
+                error_details.append(detail)
     except Exception as exc:
         return error_result("dns", started_at, exc)
 
     status = "ok" if records else "error"
     if status == "error" and not errors:
-        errors.append("No DNS records were returned")
+        detail = classify_collector_error(
+            RuntimeError("No DNS records were returned")
+        )
+        errors.append(detail["message"])
+        error_details.append(detail)
     return collector_result(
-        "dns", status, {"records": records}, errors, started_at=started_at
+        "dns",
+        status,
+        {"records": records},
+        errors,
+        error_details=error_details,
+        started_at=started_at,
     )

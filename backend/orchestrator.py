@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
 from backend.collectors import collect_crtsh, collect_dns, collect_wayback, collect_whois
-from backend.collectors.base import collector_result, iso_now
+from backend.collectors.base import error_result, iso_now
 from backend.config import Settings
+from backend.report_builder import enrich_report
 
 
 Collector = Callable[[str, Settings], Dict[str, Any]]
@@ -26,13 +27,19 @@ def _timeline(
     results: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = [
-        {"type": "scan_started", "timestamp": scan_started, "source": "scan"}
+        {
+            "type": "scan_started",
+            "label": "Scan started",
+            "timestamp": scan_started,
+            "source": "scan",
+        }
     ]
     whois_data = results.get("whois", {}).get("data", {})
     if whois_data.get("creation_date"):
         events.append(
             {
                 "type": "whois_created",
+                "label": "Domain registered",
                 "timestamp": whois_data["creation_date"],
                 "source": "whois",
             }
@@ -41,6 +48,7 @@ def _timeline(
         events.append(
             {
                 "type": "whois_updated",
+                "label": "WHOIS updated",
                 "timestamp": whois_data["updated_date"],
                 "source": "whois",
             }
@@ -56,6 +64,7 @@ def _timeline(
             events.append(
                 {
                     "type": "certificate_observed",
+                    "label": "Certificate observed",
                     "timestamp": timestamp,
                     "source": "crtsh",
                     "detail": certificate.get("common_name"),
@@ -67,15 +76,29 @@ def _timeline(
         events.append(
             {
                 "type": "wayback_first_seen",
+                "label": "Wayback first seen",
                 "timestamp": first_seen,
                 "source": "wayback",
             }
         )
 
     events.append(
-        {"type": "scan_completed", "timestamp": scan_completed, "source": "scan"}
+        {
+            "type": "scan_completed",
+            "label": "Scan completed",
+            "timestamp": scan_completed,
+            "source": "scan",
+        }
     )
-    return sorted(events, key=lambda event: str(event["timestamp"]))
+    return sorted(events, key=lambda event: _timeline_sort_key(event["timestamp"]))
+
+
+def _timeline_sort_key(value: str) -> datetime:
+    if len(value) == 14 and value.isdigit():
+        return datetime.strptime(value, "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    return parse_iso_datetime(value)
 
 
 def run_passive_scan(target: str, settings: Settings) -> Dict[str, Any]:
@@ -87,12 +110,7 @@ def run_passive_scan(target: str, settings: Settings) -> Dict[str, Any]:
             result = collector(target, settings)
         except Exception as exc:
             source = collector.__name__.removeprefix("collect_").lstrip("_")
-            result = collector_result(
-                source,
-                "error",
-                errors=[str(exc).strip() or exc.__class__.__name__],
-                started_at=iso_now(),
-            )
+            result = error_result(source, iso_now(), exc)
         results[result["source"]] = result
 
     scan_completed = iso_now()
@@ -104,15 +122,17 @@ def run_passive_scan(target: str, settings: Settings) -> Dict[str, Any]:
         if all(value != "error" for value in collector_statuses.values())
         else "partial"
     )
-    return {
+    timeline = _timeline(scan_started, scan_completed, results)
+    report = {
         "target": target,
         "status": status,
         "started_at": scan_started,
         "completed_at": scan_completed,
         "collectors": results,
         "collector_statuses": collector_statuses,
-        "timeline": _timeline(scan_started, scan_completed, results),
+        "timeline": timeline,
     }
+    return enrich_report(report)
 
 
 def parse_iso_datetime(value: str) -> datetime:

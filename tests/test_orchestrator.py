@@ -27,3 +27,9 @@ def test_orchestrator_continues_after_collector_failure(monkeypatch):
     assert report["status"] == "partial"
     assert report["collectors"]["broken"]["status"] == "error"
     assert report["collectors"]["wayback"]["status"] == "ok"
+    assert report["collectors"]["wayback"]["data"] == {
+        "captures": [],
+        "first_seen": None,
+    }
+    assert report["collectors"]["broken"]["error"]["recoverable"] is True
+    assert report["summary"]["wayback_capture_count"] == 0

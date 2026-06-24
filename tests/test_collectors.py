@@ -14,6 +14,8 @@ def assert_structure(result, source):
 class Response:
     def __init__(self, payload):
         self.payload = payload
+        self.status_code = 200
+        self.text = "response"
 
     def raise_for_status(self):
         return None
@@ -94,3 +96,21 @@ def test_collector_failure_is_structured(monkeypatch):
     assert_structure(result, "crtsh")
     assert result["status"] == "error"
     assert result["errors"] == ["source unavailable"]
+    assert result["error"] == {
+        "category": "unexpected_error",
+        "message": "source unavailable",
+        "recoverable": True,
+    }
+
+
+def test_wayback_unexpected_payload_is_parse_error(monkeypatch):
+    monkeypatch.setattr(
+        wayback.httpx,
+        "get",
+        lambda *args, **kwargs: Response({"unexpected": "payload"}),
+    )
+
+    result = wayback.collect_wayback("example.com", Settings())
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == "parse_error"
