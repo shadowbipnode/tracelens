@@ -1,0 +1,10 @@
+.env
+.git
+.tracelens
+.venv
+__pycache__
+*.pyc
+*.sqlite3
+frontend/dist
+frontend/node_modules
+.pytest_cache

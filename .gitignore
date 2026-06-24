@@ -4,14 +4,20 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 .env
+.tracelens/
 *.sqlite3
 *.db
 
 node_modules/
 frontend/node_modules/
 frontend/dist/
+
+*.log
+logs/
 
 .vscode/
 .idea/
