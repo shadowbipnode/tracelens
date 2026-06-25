@@ -7,6 +7,7 @@ from backend.collectors import (
     collect_censys,
     collect_dns,
     collect_shodan,
+    collect_urlscan,
     collect_wayback,
     collect_whois,
 )
@@ -28,11 +29,12 @@ def _whois(target: str, _settings: Settings) -> Dict[str, Any]:
 
 COLLECTORS: List[Collector] = [
     _dns,
-    collect_censys,
     _whois,
     collect_crtsh,
     collect_wayback,
+    collect_urlscan,
     collect_shodan,
+    collect_censys,
 ]
 
 

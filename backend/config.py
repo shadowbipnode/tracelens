@@ -7,8 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     db_path: str = ".tracelens/tracelens.sqlite3"
     http_timeout: float = 20.0
-    user_agent: str = "TraceLens/0.4"
+    user_agent: str = "TraceLens/0.5"
     shodan_api_key: str = Field(default="", validation_alias="SHODAN_API_KEY")
+    urlscan_api_key: str = Field(default="", validation_alias="URLSCAN_API_KEY")
     censys_api_token: str = Field(
         default="", validation_alias="CENSYS_API_TOKEN"
     )

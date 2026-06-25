@@ -41,7 +41,13 @@ def test_create_list_and_retrieve_scan(client):
     ]
     assert report.json()["summary"]["target"] == "example.com"
     assert report.json()["summary"]["domain_age_years"] >= 30
-    assert report.json()["insights"] == []
+    assert report.json()["progress"]["state"] == "completed"
+    assert report.json()["graph"]["stats"]["node_count"] >= 1
+    assert report.json()["infrastructure"]["ips"] == ["93.184.216.34"]
+    assert any(
+        insight["title"] == "Relationship graph available"
+        for insight in report.json()["insights"]
+    )
     assert any(
         event["type"] == "whois_created"
         and event["label"] == "Domain registered"

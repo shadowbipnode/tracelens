@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from backend.collectors import censys, crtsh, dns, shodan, wayback, whois
+from backend.collectors import (
+    censys,
+    crtsh,
+    dns,
+    shodan,
+    urlscan,
+    wayback,
+    whois,
+)
 from backend.config import Settings
 from backend.models.report import CollectorResult
 
@@ -400,3 +408,76 @@ def test_censys_invalid_payload_is_parse_error(monkeypatch, payload):
 
     assert result["status"] == "error"
     assert result["error"]["category"] == "parse_error"
+
+
+def test_urlscan_skips_when_api_key_is_missing():
+    result = urlscan.collect_urlscan(
+        "example.com", Settings(URLSCAN_API_KEY="", _env_file=None)
+    )
+
+    assert_structure(result, "urlscan")
+    assert result["status"] == "skipped"
+    assert result["data"]["reason"] == "not_configured"
+    assert result["error"]["category"] == "not_configured"
+
+
+def test_urlscan_parses_search_response(monkeypatch):
+    payload = {
+        "total": 2,
+        "results": [
+            {
+                "task": {"time": "2026-06-20T10:00:00Z"},
+                "page": {
+                    "url": "https://example.com/",
+                    "domain": "example.com",
+                    "ip": "192.0.2.10",
+                    "asn": "AS64500",
+                    "asnname": "Example Network",
+                    "country": "IT",
+                    "server": "cloudflare",
+                    "mimeType": "text/html",
+                },
+                "verdicts": {"overall": {"malicious": False}},
+                "screenshot": "https://urlscan.io/screenshots/example.png",
+            },
+            {
+                "task": {"time": "2026-06-21T10:00:00Z"},
+                "page": {
+                    "url": "https://www.example.com/",
+                    "domain": "www.example.com",
+                    "ip": "192.0.2.11",
+                    "country": "US",
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        urlscan.httpx, "get", lambda *args, **kwargs: Response(payload)
+    )
+
+    result = urlscan.collect_urlscan(
+        "example.com", Settings(URLSCAN_API_KEY="key", _env_file=None)
+    )
+
+    assert result["status"] == "ok"
+    assert result["data"]["result_count"] == 2
+    assert result["data"]["domains"] == ["example.com", "www.example.com"]
+    assert result["data"]["ips"] == ["192.0.2.10", "192.0.2.11"]
+    assert result["data"]["screenshot_count"] == 1
+
+
+def test_urlscan_errors_are_structured(monkeypatch):
+    monkeypatch.setattr(
+        urlscan.httpx,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            httpx.ReadTimeout("URLScan timed out")
+        ),
+    )
+
+    result = urlscan.collect_urlscan(
+        "example.com", Settings(URLSCAN_API_KEY="key", _env_file=None)
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["category"] == "timeout"

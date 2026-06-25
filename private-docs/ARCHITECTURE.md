@@ -1,305 +1,61 @@
 # TraceLens Architecture
 
-## Overview
+## Current Release
 
-TraceLens is a passive-first OSINT intelligence platform.
-
-The architecture is intentionally designed to evolve through multiple milestones without requiring disruptive rewrites.
-
-M1 uses a simple monolithic architecture:
+v0.6.0-alpha6 remains a monolithic passive-first application:
 
 - FastAPI backend
-- SQLite database
-- local collector modules
-- React frontend
-- Docker Compose for development
+- sequential local collectors
+- SQLite persistence
+- React and TypeScript dashboard
+- deterministic report enrichment
 
-Future releases may introduce PostgreSQL, Redis, Neo4j, and AI correlation services.
+The API runs scans synchronously. Collector failures are isolated and successful evidence is retained.
 
-Those future components must not complicate M1.
+## Collection Pipeline
 
----
+Collectors execute in this order:
 
-## High-Level Components
+1. DNS
+2. WHOIS
+3. crt.sh
+4. Wayback Machine
+5. URLScan search
+6. Shodan
+7. Censys
 
-### Frontend
+URLScan, Shodan, and Censys are optional. Missing credentials produce a skipped result and do not make the scan partial. URLScan only searches existing observations. Censys only enriches addresses already returned by DNS.
 
-Location:
+Every collector returns normalized data, status, timestamps, and structured error details.
 
-frontend/
+## Report Model
 
-Responsibilities:
+Stored reports contain the normalized collector outputs plus deterministic derived sections:
 
-- collect user input
-- display scan results
-- render timeline
-- render future graph views
-- export reports
+- `summary`: investigation counts and dates
+- `progress`: collector order, final step states, and completion totals
+- `infrastructure`: addresses, network ownership, providers, locations, ports, and protocols
+- `graph`: deduplicated entities, relationships, and type counts
+- `timeline`: chronological source observations
+- `insights`: compact evidence-backed findings
+- `verdict`: deterministic investigation status, coverage, confidence, risk, provider, timeline, and source-use summary
 
-Technology:
+Graph entities are stored in the report JSON rather than a separate graph database. Node limits keep reports and visualization responsive.
 
-- React
-- TypeScript
-- React Router
-- Zustand
-- Axios
+`enrich_report()` remains the compatibility boundary for old stored reports. Derived workspace fields are rebuilt at read time, so reports created before the analyst-workstation changes receive the current summary, verdict, infrastructure, graph, progress, and findings shape without a database migration. Existing collector payloads and scan API routes are unchanged.
 
-M1 UI:
+## Frontend
 
-- Scan page
-- Results page
-- Timeline section
-- Collector status section
+The Professional Analyst Workspace separates reports into Executive Summary, Infrastructure, Relationships, Timeline, Findings, and Raw Evidence views. The persistent left navigation follows the analyst workflow: assess, inspect, correlate, sequence, review, and verify.
 
----
+The Executive Summary leads with an evidence-derived Investigation Verdict. Findings retain only a short explanation and bounded evidence summary; full collector objects are rendered only in Raw Evidence. Infrastructure and host detail use collapsible sections. Timeline filtering and repeated-event grouping are client-side presentation operations and do not alter stored evidence.
 
-### Backend
+The scan request remains synchronous. While the request is pending, the UI shows indeterminate collection progress without claiming an exact collector state. After completion, it renders the report's final collector steps and totals.
 
-Location:
+The graph uses a fixed-height hierarchical SVG layout, category columns, zoom/fit/reset controls, and a visible-node limit while preserving the complete graph in JSON evidence. Long source values and JSON are contained within wrapping or internally scrollable elements so the application does not create page-level horizontal overflow.
 
-backend/
+Raw Evidence owns full collector JSON. Search and expand/collapse state are local UI state; copy and per-section download operate directly on the loaded report and do not mutate it.
 
-Responsibilities:
+## Storage and Evolution
 
-- validate targets
-- orchestrate collectors
-- normalize data
-- store scans
-- expose APIs
-
-Technology:
-
-- Python
-- FastAPI
-- Pydantic
-- SQLAlchemy
-
-Expected M1 endpoints:
-
-GET /health
-
-POST /api/scans
-
-GET /api/scans
-
-GET /api/scans/{scan_id}
-
-GET /api/scans/{scan_id}/report
-
----
-
-### Collectors
-
-Location:
-
-backend/collectors/
-
-Collectors are independent modules.
-
-Each collector must:
-
-- receive a target
-- perform passive collection
-- normalize results
-- return structured output
-- handle failures internally
-
-A collector failure must never crash the entire scan.
-
-M1 collectors:
-
-- DNS
-- WHOIS
-- crt.sh
-- Wayback Machine
-
-Future collectors:
-
-- Shodan
-- Censys
-- SecurityTrails
-- HaveIBeenPwned
-- IntelX
-
----
-
-### Storage
-
-M1 storage:
-
-SQLite
-
-Suggested path:
-
-.tracelens/tracelens.sqlite3
-
-Core entities:
-
-Scan
-Target
-Finding
-TimelineEvent
-CollectorResult
-
-Future migration path:
-
-SQLite → PostgreSQL
-
-API contracts must remain stable after migration.
-
----
-
-### Timeline Engine
-
-Timeline is one of the differentiating features of TraceLens.
-
-M1 timeline sources:
-
-- domain registration date
-- WHOIS update date
-- certificate issuance dates
-- first archived Wayback entries
-- scan execution timestamp
-
-Future timeline sources:
-
-- breaches
-- social events
-- infrastructure changes
-- ownership changes
-
----
-
-### Graph Engine
-
-Not included in M1.
-
-Planned for M3.
-
-Technology:
-
-Neo4j
-
-Entity examples:
-
-- Domain
-- Subdomain
-- IP
-- Email
-- Organization
-- Certificate
-- Nameserver
-
-Relationship examples:
-
-Domain -> resolves_to -> IP
-
-Certificate -> covers -> Domain
-
-Domain -> uses -> Nameserver
-
-Organization -> owns -> Domain
-
----
-
-### AI Correlation Engine
-
-Not included in M1.
-
-Planned for M4.
-
-Responsibilities:
-
-- correlation
-- confidence scoring
-- anomaly detection
-- executive briefing
-
-AI must never replace evidence.
-
-Every conclusion must remain traceable to collected data.
-
----
-
-### Configuration
-
-Configuration source:
-
-environment variables
-
-Never store secrets in source code.
-
-Example variables:
-
-TRACELENS_ENV=development
-
-TRACELENS_DB_PATH=.tracelens/tracelens.sqlite3
-
-TRACELENS_HTTP_TIMEOUT=20
-
-TRACELENS_USER_AGENT=TraceLens/0.1
-
-Future variables:
-
-SHODAN_API_KEY
-
-CENSYS_API_ID
-
-CENSYS_API_SECRET
-
-OPENAI_API_KEY
-
-ANTHROPIC_API_KEY
-
-DATABASE_URL
-
-REDIS_URL
-
-NEO4J_URI
-
----
-
-### Docker Strategy
-
-Docker is used for:
-
-- local development
-- optional deployment
-
-M1 must work both:
-
-with Docker Compose
-
-and
-
-directly from Python virtual environments.
-
-Example:
-
-uvicorn backend.main:app --reload
-
-Docker must remain optional.
-
----
-
-### Design Principles
-
-Passive-first
-
-Evidence-based
-
-API-first
-
-Modular collectors
-
-Stable data contracts
-
-Simple deployments
-
-Incremental evolution
-
-No premature microservices
-
-No Kubernetes before it becomes necessary
-
-No active scanning in M1
+SQLite remains the only database for this release. API and report contracts should remain stable as investigation history, richer correlation, exports, and multi-target workflows are developed for beta.

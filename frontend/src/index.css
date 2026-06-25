@@ -25,18 +25,35 @@
   -webkit-font-smoothing: antialiased;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
+  width: 100%;
+  max-width: 100%;
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  overflow-x: hidden;
   background:
     linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px),
     radial-gradient(circle at 80% 0%, rgba(74, 222, 168, 0.07), transparent 30rem),
     var(--background);
   background-size: 32px 32px, 32px 32px, auto, auto;
+}
+
+#root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  overflow-x: clip;
 }

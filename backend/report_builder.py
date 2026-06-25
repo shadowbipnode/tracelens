@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from typing import Any, Dict, List, Optional
 
 
@@ -10,6 +11,25 @@ TIMELINE_LABELS = {
     "wayback_first_seen": "Wayback first seen",
     "scan_started": "Scan started",
     "scan_completed": "Scan completed",
+}
+
+COLLECTOR_LABELS = {
+    "dns": "DNS",
+    "whois": "WHOIS",
+    "crtsh": "Certificate Transparency",
+    "wayback": "Wayback",
+    "urlscan": "URLScan",
+    "shodan": "Shodan",
+    "censys": "Censys",
+}
+
+PROVIDER_PATTERNS = {
+    "Cloudflare": ("cloudflare", "as13335"),
+    "Amazon/AWS": ("amazon", "aws", "amazonaws", "as16509", "as14618"),
+    "Google": ("google", "google cloud", "as15169"),
+    "Microsoft/Azure": ("microsoft", "azure", "azure-dns", "as8075"),
+    "Fastly": ("fastly", "as54113"),
+    "Akamai": ("akamai", "as20940", "as16625"),
 }
 
 
@@ -31,6 +51,406 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 def _record_values(records: Dict[str, Any], record_type: str) -> List[Any]:
     values = records.get(record_type, [])
     return values if isinstance(values, list) else []
+
+
+def _compact(values: List[Any]) -> List[str]:
+    return sorted(
+        {
+            str(value).strip()
+            for value in values
+            if value is not None and str(value).strip()
+        }
+    )
+
+
+def _valid_ips(values: List[Any]) -> List[str]:
+    addresses = set()
+    for value in values:
+        try:
+            addresses.add(str(ip_address(str(value).strip())))
+        except ValueError:
+            continue
+    return sorted(
+        addresses, key=lambda value: (ip_address(value).version, value)
+    )
+
+
+def build_progress(
+    status: str, collectors: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    steps = []
+    counts = {"ok": 0, "skipped": 0, "error": 0}
+    for source, result in collectors.items():
+        collector_status = result.get("status", "pending")
+        if collector_status in counts:
+            counts[collector_status] += 1
+        steps.append(
+            {
+                "source": source,
+                "label": COLLECTOR_LABELS.get(
+                    source, source.replace("_", " ").title()
+                ),
+                "status": collector_status,
+                "started_at": result.get("started_at"),
+                "completed_at": result.get("completed_at"),
+            }
+        )
+
+    total = len(steps)
+    completed = sum(
+        1 for step in steps if step["status"] in {"ok", "skipped", "error"}
+    )
+    if status == "failed":
+        state = "failed"
+    elif status == "partial" or counts["error"]:
+        state = "partial"
+    elif total and completed == total:
+        state = "completed"
+    elif completed:
+        state = "running"
+    else:
+        state = "idle"
+    return {
+        "total_collectors": total,
+        "completed_collectors": completed,
+        "successful_collectors": counts["ok"],
+        "skipped_collectors": counts["skipped"],
+        "failed_collectors": counts["error"],
+        "percent": round((completed / total) * 100) if total else 0,
+        "state": state,
+        "steps": steps,
+    }
+
+
+def build_infrastructure(
+    collectors: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    dns_records = collectors.get("dns", {}).get("data", {}).get("records", {})
+    censys_data = collectors.get("censys", {}).get("data", {})
+    shodan_data = collectors.get("shodan", {}).get("data", {})
+    urlscan_data = collectors.get("urlscan", {}).get("data", {})
+
+    ip_values = [
+        *_record_values(dns_records, "A"),
+        *_record_values(dns_records, "AAAA"),
+        *urlscan_data.get("ips", []),
+    ]
+    for record in shodan_data.get("records", []):
+        if isinstance(record, dict) and record.get("type") in {"A", "AAAA"}:
+            ip_values.append(record.get("value"))
+    for host in censys_data.get("hosts", []):
+        if isinstance(host, dict):
+            ip_values.append(host.get("ip"))
+    ips = _valid_ips(ip_values)
+
+    asns = list(censys_data.get("asns", []))
+    asns.extend(urlscan_data.get("asns", []))
+    organizations = list(censys_data.get("organizations", []))
+    countries = list(urlscan_data.get("countries", []))
+    ports = list(censys_data.get("ports", []))
+    protocols = list(censys_data.get("protocols", []))
+
+    evidence_strings = [
+        *organizations,
+        *[str(value) for value in asns],
+        *[str(value) for value in _record_values(dns_records, "NS")],
+        *[str(value) for value in shodan_data.get("tags", [])],
+        *[str(value) for value in urlscan_data.get("servers", [])],
+    ]
+    for host in censys_data.get("hosts", []):
+        if not isinstance(host, dict):
+            continue
+        autonomous_system = host.get("autonomous_system", {})
+        location = host.get("location", {})
+        whois = host.get("whois", {})
+        if isinstance(autonomous_system, dict):
+            asn = autonomous_system.get("asn")
+            if asn is not None:
+                asns.append(asn)
+            organizations.extend(
+                [
+                    autonomous_system.get("name"),
+                    autonomous_system.get("description"),
+                ]
+            )
+            evidence_strings.extend(
+                [
+                    autonomous_system.get("name"),
+                    autonomous_system.get("description"),
+                    f"AS{asn}" if asn is not None else None,
+                ]
+            )
+        if isinstance(whois, dict):
+            organizations.extend(
+                [whois.get("organization"), whois.get("network_name")]
+            )
+        if isinstance(location, dict):
+            countries.append(
+                location.get("country_code") or location.get("country")
+            )
+        for service in host.get("services", []):
+            if not isinstance(service, dict):
+                continue
+            if service.get("port") is not None:
+                ports.append(service.get("port"))
+            protocols.extend(
+                [service.get("protocol"), service.get("service_name")]
+            )
+
+    haystack = " ".join(
+        str(value).lower() for value in evidence_strings if value
+    )
+    providers = sorted(
+        provider
+        for provider, patterns in PROVIDER_PATTERNS.items()
+        if any(pattern in haystack for pattern in patterns)
+    )
+    normalized_ports = sorted(
+        {int(value) for value in ports if isinstance(value, int)}
+    )
+    return {
+        "ips": ips,
+        "ipv4_count": sum(1 for value in ips if ip_address(value).version == 4),
+        "ipv6_count": sum(1 for value in ips if ip_address(value).version == 6),
+        "asns": _compact(asns),
+        "organizations": _compact(organizations),
+        "providers": providers,
+        "countries": _compact(countries),
+        "ports": normalized_ports,
+        "protocols": _compact(protocols),
+        "service_count": int(censys_data.get("service_count", 0) or 0),
+        "cloud_or_cdn_detected": bool(providers),
+    }
+
+
+def build_graph(
+    target: str, collectors: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: Dict[str, Dict[str, Any]] = {}
+
+    def node(
+        node_type: str,
+        value: Any,
+        label: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        node_id = f"{node_type}:{text}"
+        if node_id not in nodes:
+            nodes[node_id] = {
+                "id": node_id,
+                "type": node_type,
+                "label": label or str(value).strip(),
+                "metadata": metadata or {},
+            }
+        elif metadata:
+            nodes[node_id]["metadata"].update(metadata)
+        return node_id
+
+    def edge(
+        source: Optional[str], target_id: Optional[str], edge_type: str
+    ) -> None:
+        if not source or not target_id or source == target_id:
+            return
+        edge_id = f"{edge_type}:{source}->{target_id}"
+        edges.setdefault(
+            edge_id,
+            {
+                "id": edge_id,
+                "source": source,
+                "target": target_id,
+                "type": edge_type,
+            },
+        )
+
+    domain_id = node("domain", target, target)
+    source_ids = {}
+    for source, result in collectors.items():
+        source_id = node(
+            "source",
+            source,
+            COLLECTOR_LABELS.get(source, source.title()),
+            {"status": result.get("status")},
+        )
+        source_ids[source] = source_id
+        edge(domain_id, source_id, "observed_by")
+
+    dns_records = collectors.get("dns", {}).get("data", {}).get("records", {})
+    for value in [
+        *_record_values(dns_records, "A"),
+        *_record_values(dns_records, "AAAA"),
+    ]:
+        try:
+            address = str(ip_address(str(value).strip()))
+        except ValueError:
+            continue
+        ip_id = node("ip", address, address)
+        edge(domain_id, ip_id, "resolves_to")
+        edge(ip_id, source_ids.get("dns"), "reported_by")
+    for value in _record_values(dns_records, "NS"):
+        nameserver_id = node("nameserver", value, str(value).rstrip("."))
+        edge(domain_id, nameserver_id, "uses_nameserver")
+        edge(nameserver_id, source_ids.get("dns"), "reported_by")
+    for value in _record_values(dns_records, "MX"):
+        exchange = value.get("exchange") if isinstance(value, dict) else value
+        mx_id = node("mx", exchange, str(exchange).rstrip("."))
+        edge(domain_id, mx_id, "uses_mx")
+        edge(mx_id, source_ids.get("dns"), "reported_by")
+
+    crtsh_data = collectors.get("crtsh", {}).get("data", {})
+    shodan_data = collectors.get("shodan", {}).get("data", {})
+    urlscan_data = collectors.get("urlscan", {}).get("data", {})
+    urlscan_domains = [
+        value
+        for value in urlscan_data.get("domains", [])
+        if str(value).lower().endswith("." + target.lower())
+    ]
+
+    subdomain_ids: Dict[str, str] = {}
+    subdomains = _compact(
+        [
+            *crtsh_data.get("subdomains", []),
+            *shodan_data.get("subdomains", []),
+            *urlscan_domains,
+        ]
+    )[:100]
+    for subdomain in subdomains:
+        subdomain_id = node("subdomain", subdomain, subdomain)
+        if subdomain_id:
+            subdomain_ids[subdomain.lower()] = subdomain_id
+            edge(domain_id, subdomain_id, "has_record")
+            if subdomain in crtsh_data.get("subdomains", []):
+                edge(subdomain_id, source_ids.get("crtsh"), "reported_by")
+            elif subdomain in shodan_data.get("subdomains", []):
+                edge(subdomain_id, source_ids.get("shodan"), "reported_by")
+            else:
+                edge(subdomain_id, source_ids.get("urlscan"), "reported_by")
+
+    for certificate in crtsh_data.get("certificates", [])[:50]:
+        if not isinstance(certificate, dict):
+            continue
+        identifier = (
+            certificate.get("serial_number")
+            or certificate.get("id")
+            or "|".join(
+                str(certificate.get(key, ""))
+                for key in ("common_name", "not_before", "issuer_name")
+            )
+        )
+        certificate_id = node(
+            "certificate",
+            identifier,
+            str(certificate.get("common_name") or identifier),
+            {
+                key: certificate.get(key)
+                for key in ("issuer_name", "not_before", "not_after")
+                if certificate.get(key)
+            },
+        )
+        edge(domain_id, certificate_id, "covered_by_certificate")
+        edge(certificate_id, source_ids.get("crtsh"), "reported_by")
+        common_name = str(certificate.get("common_name", "")).lower()
+        if common_name in subdomain_ids:
+            edge(
+                subdomain_ids[common_name],
+                certificate_id,
+                "covered_by_certificate",
+            )
+
+    service_count = 0
+    for host in collectors.get("censys", {}).get("data", {}).get("hosts", []):
+        if not isinstance(host, dict) or not host.get("ip"):
+            continue
+        ip_id = node("ip", host["ip"], str(host["ip"]))
+        edge(domain_id, ip_id, "resolves_to")
+        edge(ip_id, source_ids.get("censys"), "reported_by")
+        autonomous_system = host.get("autonomous_system", {})
+        if isinstance(autonomous_system, dict) and autonomous_system.get("asn"):
+            asn = autonomous_system["asn"]
+            asn_id = node(
+                "asn",
+                asn,
+                f"AS{asn}",
+                {
+                    key: autonomous_system.get(key)
+                    for key in ("name", "description", "country_code")
+                    if autonomous_system.get(key)
+                },
+            )
+            edge(ip_id, asn_id, "belongs_to_asn")
+            organization = autonomous_system.get("name") or autonomous_system.get(
+                "description"
+            )
+            organization_id = node(
+                "organization", organization, str(organization)
+            )
+            edge(asn_id, organization_id, "operated_by")
+        whois = host.get("whois", {})
+        if isinstance(whois, dict):
+            organization = whois.get("organization")
+            organization_id = node(
+                "organization", organization, str(organization)
+            )
+            edge(ip_id, organization_id, "operated_by")
+        for service in host.get("services", []):
+            if service_count >= 100 or not isinstance(service, dict):
+                break
+            port = service.get("port")
+            protocol = service.get("protocol") or service.get("service_name")
+            if port is None and not protocol:
+                continue
+            service_value = f"{host['ip']}:{port}:{protocol or 'service'}"
+            service_id = node(
+                "service",
+                service_value,
+                f"{port or '—'} / {protocol or 'service'}",
+                {
+                    key: service.get(key)
+                    for key in ("port", "protocol", "transport_protocol")
+                    if service.get(key) is not None
+                },
+            )
+            edge(ip_id, service_id, "exposes_service")
+            edge(service_id, source_ids.get("censys"), "reported_by")
+            service_count += 1
+
+    shodan_data = collectors.get("shodan", {}).get("data", {})
+    for record in shodan_data.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        fqdn = str(record.get("fqdn") or "").lower()
+        record_type = record.get("type")
+        value = record.get("value")
+        subdomain_id = subdomain_ids.get(fqdn)
+        if record_type in {"A", "AAAA"}:
+            try:
+                ip_id = node("ip", str(ip_address(str(value))), str(value))
+            except ValueError:
+                continue
+            edge(subdomain_id or domain_id, ip_id, "resolves_to")
+            edge(ip_id, source_ids.get("shodan"), "reported_by")
+        elif value:
+            edge(subdomain_id or domain_id, source_ids.get("shodan"), "observed_by")
+
+    ordered_nodes = sorted(nodes.values(), key=lambda item: item["id"])
+    ordered_edges = sorted(edges.values(), key=lambda item: item["id"])
+    type_counts: Dict[str, int] = {}
+    for item in ordered_nodes:
+        type_counts[item["type"]] = type_counts.get(item["type"], 0) + 1
+    return {
+        "nodes": ordered_nodes,
+        "edges": ordered_edges,
+        "stats": {
+            "node_count": len(ordered_nodes),
+            "edge_count": len(ordered_edges),
+            "type_counts": dict(sorted(type_counts.items())),
+        },
+    }
 
 
 def _domain_age_years(creation_date: Any, reference_date: Any) -> Optional[int]:
@@ -57,6 +477,7 @@ def build_summary(
     wayback_data = collectors.get("wayback", {}).get("data", {})
     shodan_data = collectors.get("shodan", {}).get("data", {})
     censys_data = collectors.get("censys", {}).get("data", {})
+    urlscan_data = collectors.get("urlscan", {}).get("data", {})
 
     dated_events = [
         event
@@ -114,6 +535,9 @@ def build_summary(
         "censys_service_count": censys_data.get("service_count", 0),
         "censys_asn_count": len(censys_data.get("asns", [])),
         "censys_port_count": len(censys_data.get("ports", [])),
+        "urlscan_result_count": urlscan_data.get("result_count", 0),
+        "urlscan_domain_count": len(urlscan_data.get("domains", [])),
+        "urlscan_ip_count": len(urlscan_data.get("ips", [])),
         "first_seen": first_seen,
         "last_updated": whois_data.get("updated_date"),
     }
@@ -207,62 +631,28 @@ def build_shodan_insights(
     collectors: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     collector = collectors.get("shodan")
-    if not collector:
+    if not collector or collector.get("status") != "ok":
         return []
 
-    status = collector.get("status")
     data = collector.get("data", {})
-    detail = collector.get("error") or next(
-        iter(collector.get("error_details", [])), {}
-    )
-    errors = collector.get("errors", [])
+    if not data.get("subdomain_count") and not data.get("record_count"):
+        return []
 
-    if status == "ok":
-        return [
-            {
-                "type": "shodan",
-                "severity": "info",
-                "title": "Shodan passive data available",
-                "description": "Shodan returned passive DNS intelligence for this domain.",
-                "evidence": [
-                    {
-                        "subdomain_count": data.get("subdomain_count", 0),
-                        "record_count": data.get("record_count", 0),
-                        "tags": data.get("tags", []),
-                    }
-                ],
-            }
-        ]
-
-    if status == "skipped":
-        return [
-            {
-                "type": "shodan",
-                "severity": "notice",
-                "title": "Shodan skipped because API key missing",
-                "description": "Optional Shodan collection was not run.",
-                "evidence": errors,
-            }
-        ]
-
-    if status == "error":
-        category = detail.get("category")
-        if category == "rate_limited":
-            description = "Shodan rate limited the passive DNS request."
-        else:
-            description = "Shodan passive DNS data was temporarily unavailable."
-        return [
-            {
-                "type": "shodan",
-                "severity": "warning",
-                "title": "Shodan rate limited/unavailable",
-                "description": description,
-                "evidence": [detail] if detail else errors,
-            }
-        ]
-
-    return []
-
+    return [
+        {
+            "type": "shodan",
+            "severity": "info",
+            "title": "Shodan passive data available",
+            "description": "Shodan returned passive DNS intelligence for this domain.",
+            "evidence": [
+                {
+                    "subdomains": data.get("subdomain_count", 0),
+                    "records": data.get("record_count", 0),
+                    "tags": data.get("tags", [])[:5],
+                }
+            ],
+        }
+    ]
 
 def build_censys_insights(
     collectors: Dict[str, Dict[str, Any]],
@@ -358,28 +748,209 @@ def build_censys_insights(
             "notice",
         )
 
-    providers = (
-        "cloudflare",
-        "akamai",
-        "fastly",
-        "amazon",
-        "aws",
-        "google",
-        "microsoft",
-        "azure",
-    )
-    infrastructure = [
-        organization
-        for organization in data.get("organizations", [])
-        if any(provider in str(organization).lower() for provider in providers)
-    ]
-    if infrastructure:
+    return insights
+
+
+def build_workspace_insights(
+    collectors: Dict[str, Dict[str, Any]],
+    graph: Dict[str, Any],
+    infrastructure: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    insights: List[Dict[str, Any]] = []
+
+    def add(
+        insight_type: str,
+        title: str,
+        description: str,
+        evidence: List[Any],
+        severity: str = "info",
+    ) -> None:
+        insights.append(
+            {
+                "type": insight_type,
+                "severity": severity,
+                "title": title,
+                "description": description,
+                "evidence": evidence[:5],
+            }
+        )
+
+    stats = graph.get("stats", {})
+    if stats.get("node_count"):
         add(
-            "Cloud/CDN infrastructure detected",
-            "Censys organization and ASN metadata indicates major cloud or CDN infrastructure.",
-            infrastructure,
+            "graph",
+            "Relationship graph available",
+            "Collected evidence was correlated into a deterministic entity graph.",
+            [
+                {
+                    "nodes": stats.get("node_count", 0),
+                    "edges": stats.get("edge_count", 0),
+                }
+            ],
+        )
+    urlscan = collectors.get("urlscan", {})
+    if urlscan.get("status") == "ok" and urlscan.get("data", {}).get(
+        "result_count", 0
+    ):
+        data = urlscan["data"]
+        add(
+            "urlscan",
+            "URLScan web evidence available",
+            "URLScan search returned existing public observations without submitting a new scan.",
+            [
+                {
+                    "results": data.get("result_count", 0),
+                    "domains": data.get("domains", [])[:5],
+                    "ips": data.get("ips", [])[:5],
+                }
+            ],
+        )
+    if len(infrastructure.get("countries", [])) > 1:
+        add(
+            "infrastructure",
+            "Multiple countries observed",
+            "Passive source metadata references infrastructure in multiple countries.",
+            infrastructure["countries"],
+            "notice",
         )
     return insights
+
+
+def build_verdict(
+    target: str,
+    status: str,
+    collectors: Dict[str, Dict[str, Any]],
+    timeline: List[Dict[str, Any]],
+    summary: Dict[str, Any],
+    infrastructure: Dict[str, Any],
+    insights: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    attempted = [
+        result
+        for result in collectors.values()
+        if result.get("status") != "skipped"
+    ]
+    total = len(attempted)
+    successful = sum(
+        1 for result in attempted if result.get("status") == "ok"
+    )
+    failed = sum(
+        1 for result in attempted if result.get("status") == "error"
+    )
+    coverage_ratio = successful / total if total else 0
+    if coverage_ratio >= 0.75 and not failed:
+        coverage = "High"
+    elif coverage_ratio >= 0.5:
+        coverage = "Moderate"
+    else:
+        coverage = "Limited"
+
+    corroborating_sources = sum(
+        1
+        for source in ("dns", "whois", "crtsh", "wayback", "censys", "urlscan")
+        if collectors.get(source, {}).get("status") == "ok"
+    )
+    if coverage == "High" and corroborating_sources >= 4:
+        confidence = "High"
+    elif corroborating_sources >= 2:
+        confidence = "Moderate"
+    else:
+        confidence = "Limited"
+
+    critical_count = sum(
+        1 for insight in insights if insight.get("severity") == "critical"
+    )
+    if critical_count:
+        risk = "Critical"
+    else:
+        risk = "Informational"
+
+    dns_records = collectors.get("dns", {}).get("data", {}).get("records", {})
+    mx_hosts = [
+        str(record.get("exchange", "") if isinstance(record, dict) else record)
+        for record in _record_values(dns_records, "MX")
+    ]
+    email_haystack = " ".join(mx_hosts).lower()
+    email_providers = []
+    if "google" in email_haystack or "aspmx" in email_haystack:
+        email_providers.append("Google Workspace")
+    if "outlook" in email_haystack or "protection.outlook" in email_haystack:
+        email_providers.append("Microsoft 365")
+
+    host_collectors = [
+        source
+        for source in ("censys", "shodan", "urlscan")
+        if collectors.get(source, {}).get("status") == "ok"
+    ]
+    sources_used = [
+        COLLECTOR_LABELS.get(source, source.title())
+        for source, result in collectors.items()
+        if result.get("status") == "ok"
+    ]
+    dated_events = [
+        event
+        for event in timeline
+        if event.get("type") not in {"scan_started", "scan_completed"}
+        and _parse_timestamp(event.get("timestamp")) is not None
+    ]
+    timeline_start = (
+        min(
+            dated_events,
+            key=lambda event: _parse_timestamp(event.get("timestamp"))
+            or datetime.max.replace(tzinfo=timezone.utc),
+        ).get("timestamp")
+        if dated_events
+        else None
+    )
+    timeline_end = (
+        max(
+            dated_events,
+            key=lambda event: _parse_timestamp(event.get("timestamp"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        ).get("timestamp")
+        if dated_events
+        else None
+    )
+
+    narrative = []
+    if infrastructure.get("providers"):
+        narrative.append(
+            f"{', '.join(infrastructure['providers'])} infrastructure was observed."
+        )
+    if infrastructure.get("asns") or infrastructure.get("organizations"):
+        narrative.append(
+            "Passive DNS and network ownership evidence provide infrastructure attribution."
+        )
+    if email_providers:
+        narrative.append(
+            f"{', '.join(email_providers)} hosted email services are present."
+        )
+    if host_collectors:
+        narrative.append(
+            f"Passive host intelligence is available from {', '.join(COLLECTOR_LABELS[source] for source in host_collectors)}."
+        )
+    narrative.append(f"Passive evidence coverage is {coverage.lower()}.")
+    narrative.append(f"Confidence: {confidence}.")
+
+    return {
+        "target": target,
+        "investigation_status": status,
+        "coverage_status": coverage,
+        "risk_level": risk,
+        "confidence_level": confidence,
+        "domain_age_years": summary.get("domain_age_years"),
+        "registrar": summary.get("registrar"),
+        "infrastructure_providers": infrastructure.get("providers", []),
+        "email_providers": email_providers,
+        "host_intelligence_sources": host_collectors,
+        "timeline": {
+            "event_count": len(timeline),
+            "first_observation": timeline_start,
+            "last_observation": timeline_end,
+        },
+        "sources_used": sources_used,
+        "narrative": " ".join(narrative),
+    }
 
 
 def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,6 +965,11 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     collectors = report.get("collectors", {})
+    report["progress"] = build_progress(
+        report.get("status", "unknown"), collectors
+    )
+    report["infrastructure"] = build_infrastructure(collectors)
+    report["graph"] = build_graph(report.get("target", ""), collectors)
     report["summary"] = build_summary(
         report.get("target", ""),
         report.get("status", "unknown"),
@@ -405,5 +981,17 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
         *build_dns_insights(collectors),
         *build_shodan_insights(collectors),
         *build_censys_insights(collectors),
+        *build_workspace_insights(
+            collectors, report["graph"], report["infrastructure"]
+        ),
     ]
+    report["verdict"] = build_verdict(
+        report.get("target", ""),
+        report.get("status", "unknown"),
+        collectors,
+        timeline,
+        report["summary"],
+        report["infrastructure"],
+        report["insights"],
+    )
     return report

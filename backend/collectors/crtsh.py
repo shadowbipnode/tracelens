@@ -24,35 +24,44 @@ def _covered_names(value: Any) -> List[str]:
 def _fetch_crtsh(target: str, settings: Settings) -> List[Dict[str, Any]]:
     queries = [f"%.{target}", target]
     last_error: Exception | None = None
+    timeout = httpx.Timeout(max(settings.http_timeout, 45.0), connect=10.0)
 
     for query in queries:
-        try:
-            response = httpx.get(
-                "https://crt.sh/",
-                params={"q": query, "output": "json"},
-                headers={"User-Agent": settings.user_agent},
-                timeout=httpx.Timeout(settings.http_timeout, connect=10.0),
-                follow_redirects=True,
-            )
-            if response.status_code == 404:
-                continue
-            response.raise_for_status()
-            if not response.text.strip():
-                return []
+        for _attempt in range(3):
             try:
-                payload = response.json()
-            except ValueError as exc:
-                raise CollectorParseError("crt.sh returned invalid JSON") from exc
-            if isinstance(payload, list):
-                if any(not isinstance(item, dict) for item in payload):
-                    raise CollectorParseError(
-                        "crt.sh returned an unexpected payload shape"
+                response = httpx.get(
+                    "https://crt.sh/",
+                    params={"q": query, "output": "json"},
+                    headers={"User-Agent": settings.user_agent},
+                    timeout=timeout,
+                    follow_redirects=True,
+                )
+                if response.status_code == 404:
+                    break
+                if response.status_code in {502, 503, 504}:
+                    last_error = httpx.HTTPStatusError(
+                        f"crt.sh temporarily unavailable: {response.status_code}",
+                        request=response.request,
+                        response=response,
                     )
-                return payload
-            raise CollectorParseError("crt.sh returned an unexpected payload shape")
-        except Exception as exc:
-            last_error = exc
-            continue
+                    continue
+                response.raise_for_status()
+                if not response.text.strip():
+                    return []
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise CollectorParseError("crt.sh returned invalid JSON") from exc
+                if isinstance(payload, list):
+                    if any(not isinstance(item, dict) for item in payload):
+                        raise CollectorParseError(
+                            "crt.sh returned an unexpected payload shape"
+                        )
+                    return payload
+                raise CollectorParseError("crt.sh returned an unexpected payload shape")
+            except Exception as exc:
+                last_error = exc
+                continue
 
     if last_error:
         raise last_error

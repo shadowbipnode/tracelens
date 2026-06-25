@@ -1,5 +1,5 @@
 from backend.config import Settings
-from backend.collectors import collect_censys, collect_shodan
+from backend.collectors import collect_censys, collect_shodan, collect_urlscan
 from backend.orchestrator import COLLECTORS, run_passive_scan
 
 
@@ -39,8 +39,8 @@ def test_orchestrator_continues_after_collector_failure(monkeypatch):
 
 
 def test_orchestrator_orders_censys_after_dns_and_includes_shodan():
-    assert COLLECTORS[1] is collect_censys
-    assert COLLECTORS[-1] is collect_shodan
+    assert COLLECTORS.index(collect_urlscan) < COLLECTORS.index(collect_shodan)
+    assert COLLECTORS.index(collect_shodan) < COLLECTORS.index(collect_censys)
 
 
 def test_orchestrator_passes_dns_context_to_censys(monkeypatch):
@@ -99,6 +99,18 @@ def test_missing_censys_token_does_not_make_scan_partial(monkeypatch):
 
     assert report["status"] == "completed"
     assert report["collector_statuses"] == {"censys": "skipped"}
+
+
+def test_missing_urlscan_key_does_not_make_scan_partial(monkeypatch):
+    monkeypatch.setattr("backend.orchestrator.COLLECTORS", [collect_urlscan])
+
+    report = run_passive_scan(
+        "example.com", Settings(URLSCAN_API_KEY="", _env_file=None)
+    )
+
+    assert report["status"] == "completed"
+    assert report["collector_statuses"] == {"urlscan": "skipped"}
+    assert report["progress"]["skipped_collectors"] == 1
 
 
 def test_censys_error_makes_scan_partial(monkeypatch):
