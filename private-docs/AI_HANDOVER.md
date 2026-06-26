@@ -1,112 +1,46 @@
-# TraceLens AI Handover
+# TraceLens engineering handover
 
-TraceLens is a passive-first OSINT intelligence platform focused on domain-based investigations.
+TraceLens is a passive-first domain investigation platform.
 
-The project must grow incrementally through small releasable milestones.
+## Current implementation
 
-The objective is not to build another OSINT data aggregator. The objective is to help analysts collect, normalize, correlate, timeline, and export intelligence from public sources.
+The current release is v0.7.0-alpha1 with report schema 2.0.
 
-Default mode is passive-first.
+The product collects public evidence, normalizes source payloads, performs deterministic correlations, builds chronological history, and presents investigation-specific views.
 
-No active scanning should be introduced before the passive intelligence pipeline is stable and tested.
+## Non-negotiable constraints
 
-## Product Vision
+- no active target scanning
+- no unsupported attribution
+- every fingerprint and correlation cites evidence
+- raw evidence remains authoritative
+- optional sources fail independently
+- stored reports remain readable
+- dependencies remain minimal
 
-TraceLens should become an investigation platform capable of:
+## Key files
 
-- collecting public intelligence
-- normalizing heterogeneous data sources
-- correlating findings
-- building timelines
-- generating professional reports
-- supporting graph-based investigations
+- `backend/orchestrator.py`: sequential collection and report assembly
+- `backend/report_builder.py`: compatibility and derived-section orchestration
+- `backend/intelligence/`: focused intelligence builders
+- `backend/collectors/`: source-specific normalization
+- `frontend/src/App.tsx`: workspace views and interactions
+- `frontend/src/App.css`: dark professional interface
+- `tests/test_intelligence.py`: schema-2.0 intelligence coverage
 
-Target users:
+## Report evolution
 
-- security analysts
-- blue teams
-- journalists
-- researchers
-- infrastructure operators
-- compliance teams
+Do not mutate or remove raw collector fields. Add new derived fields through the enrichment boundary. Builders must return deterministic output for identical input and must include exact evidence references for conclusions.
 
-## M1 Scope
+## Verification
 
-Input:
-- single domain
+```bash
+python -m compileall backend
+pytest -q
 
-Collectors:
-- DNS
-- WHOIS
-- crt.sh
-- Wayback Machine
+cd frontend
+npm run build
+npm run lint
+```
 
-Storage:
-- SQLite
-
-Backend:
-- FastAPI
-
-Frontend:
-- React
-
-Output:
-- JSON report
-- simple dashboard
-
-AI:
-- not included
-
-## Future Milestones
-
-M2:
-- Shodan
-- Censys
-- scan history
-- PostgreSQL
-
-M3:
-- graph model
-- Neo4j
-
-M4:
-- AI correlation engine
-- confidence scoring
-- anomaly detection
-
-M5:
-- professional reporting
-- PDF export
-- multi-target investigations
-
-## Code Quality Rules
-
-Never mention:
-- AI generated
-- ChatGPT
-- Codex
-- Claude
-- Gemini
-- Copilot
-- Cursor
-- LLM
-
-Comments should only provide technical value.
-
-Code must look human-maintained and production-oriented.
-
-## Development Philosophy
-
-Prefer:
-- simple modules
-- typed Python
-- deterministic tests
-- explicit error handling
-- documented APIs
-
-Avoid:
-- premature abstractions
-- microservices
-- Kubernetes
-- unnecessary dependencies
-- hidden side effects
+Remote services are mocked in tests.

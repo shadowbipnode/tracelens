@@ -6,7 +6,7 @@ services:
     environment:
       TRACELENS_DB_PATH: /data/tracelens.sqlite3
       TRACELENS_HTTP_TIMEOUT: "20"
-      TRACELENS_USER_AGENT: TraceLens/0.1
+      TRACELENS_USER_AGENT: TraceLens/0.7
     ports:
       - "8000:8000"
     volumes:

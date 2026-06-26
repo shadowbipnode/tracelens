@@ -1,55 +1,44 @@
 # TraceLens
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/shadowbipnode)
-![Status](https://img.shields.io/badge/status-v0.6.0--alpha6-brightgreen)
+[![Status](https://img.shields.io/badge/status-v0.7.0--alpha1-brightgreen)](https://github.com/shadowbipnode/tracelens)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
 ![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)
 ![React](https://img.shields.io/badge/frontend-React-61dafb)
 ![OSINT](https://img.shields.io/badge/OSINT-passive--first-purple)
-![SQLite](https://img.shields.io/badge/database-SQLite-lightgrey)
 
-TraceLens is a passive-first domain intelligence application. It collects public information, normalizes source results, derives evidence-backed insights, builds an investigation timeline, and stores reports for later review.
+TraceLens is a passive-first investigation workspace for domain intelligence. It collects public evidence, normalizes source results, performs deterministic correlations, and presents infrastructure, organization, certificate, technology, timeline, and finding views without actively probing target services.
 
-## v0.6.0-alpha6 capabilities
+## Core principles
 
-- Validate and scan one domain at a time
-- Collect DNS records without subdomain brute forcing
-- Collect public WHOIS registration metadata
-- Query certificate transparency data from crt.sh
-- Query archived URL metadata from the Wayback Machine
-- Optionally query Shodan passive DNS data for subdomains, records, and tags
-- Optionally query Censys host intelligence for IP addresses already found in DNS A and AAAA records
-- Optionally search existing URLScan observations without submitting a new scan
-- Continue scans when an individual collector fails
-- Store scan reports in SQLite
-- Review a deterministic relationship graph across domains, subdomains, IPs, network ownership, certificates, services, and sources
-- Review a correlated infrastructure dashboard covering addresses, ASNs, organizations, providers, countries, ports, and protocols
-- Follow synchronous scan progress through collector steps and a final completion summary
-- Review summary metrics for registration, DNS, certificate, archive, URLScan, Shodan, and Censys evidence
-- Review deterministic DNS and host intelligence insights with supporting evidence
-- Use the Professional Analyst Workspace with section-based report navigation
-- Review Executive Summary, Infrastructure, Relationships, Timeline, Findings, and Raw Evidence as dedicated views
-- Start with an evidence-derived Investigation Verdict covering status, coverage, risk, confidence, providers, timeline coverage, and sources used
-- Read compact Critical, Warning, Notice, and Info findings while keeping full payloads isolated in Raw Evidence
-- Filter and summarize timeline events, control the hierarchical relationship graph, and collapse noisy infrastructure detail
-- Search, expand, collapse, copy, and download collector JSON from the Raw Evidence workspace
-- Review Censys hosts, services, ports, protocols, ASN metadata, organizations, and locations
-- Browse, search, and filter recent scans
-- See user-friendly collector error categories while retaining raw details
-- Review a chronological timeline with certificate and Censys service observations
-- Download the complete current report as JSON
-- Access scan metadata and normalized reports through FastAPI
+- Passive-first collection
+- No port scanning, vulnerability scanning, brute forcing, exploitation, or authenticated probing
+- Evidence attached to every derived fingerprint and correlation
+- Deterministic, explainable conclusions
+- Graceful degradation when optional sources fail
+- Backward-compatible enrichment of stored reports
 
-TraceLens does not perform port scanning, vulnerability scanning, brute forcing, credential collection, exploitation, or authenticated probing.
+## Current capabilities
+
+- DNS, WHOIS, crt.sh, and Wayback collection
+- Optional URLScan search of existing public observations
+- Optional Shodan passive DNS collection
+- Optional Censys enrichment for IPs already returned by DNS
+- Structured timeout, rate-limit, credential, plan, network, and parse errors
+- Passive technology fingerprinting for supported servers, proxies, CDN, cloud, frameworks, CMS, mail providers, analytics, tracking, and programming hints
+- Organization profiles correlating domains, subdomains, IPs, ASNs, organizations, MX, NS, certificate issuers, and providers
+- Certificate investigation covering issuers, validity, SANs, wildcards, duplicates, reuse, shared names, expiration, and domain relationships
+- Unified chronological timeline across registration, certificate, archive, URLScan, Shodan, Censys, and scan events
+- Findings separated into Observed Facts, Correlated Findings, and Analyst Notes
+- Executive collection-quality assessment with coverage, confidence, evidence completeness, passive exposure, infrastructure, mail, and technology summaries
+- Interactive relationship graph with dragging, panning, wheel zoom, fit/reset, category collapse, search, selection, connected-node highlighting, relationship highlighting, and entity inspection
+- SQLite report history and JSON export
 
 ## Requirements
 
 - Python 3.11 or newer
 - Node.js 20 or newer
 - npm
-
-Docker Compose is optional.
 
 ## Installation
 
@@ -63,93 +52,63 @@ pip install -r requirements.txt
 
 cd frontend
 npm install
-```
-
-Copy the example environment file if you want to override defaults:
-
-```bash
 cd ..
 cp .env.example .env
 ```
 
-Available settings:
+## Configuration
 
-```text
+```dotenv
 TRACELENS_DB_PATH=.tracelens/tracelens.sqlite3
 TRACELENS_HTTP_TIMEOUT=20
-TRACELENS_USER_AGENT=TraceLens/0.5
+TRACELENS_USER_AGENT=TraceLens/0.7
+
 SHODAN_API_KEY=
 CENSYS_API_TOKEN=
 URLSCAN_API_KEY=
 ```
 
-## Optional API Integrations
+Optional integrations are skipped when credentials are absent and do not make the investigation partial. Invalid credentials, unsupported plans, rate limits, timeouts, and temporary outages are retained as structured source errors while successful evidence remains usable.
 
-TraceLens works without API keys. Shodan, Censys, and URLScan integrations are optional. A missing key or token causes the related collector to be skipped without making the scan partial.
+URLScan only searches existing public observations. TraceLens does not submit a new URLScan job.
 
-Create or sign in to a Shodan account at https://account.shodan.io, then copy the API key shown in the account overview. Add it to your local `.env` file:
-
-```dotenv
-SHODAN_API_KEY=
-```
-
-For Censys host intelligence, create a Personal Access Token and add it to your local `.env` file:
-
-```dotenv
-CENSYS_API_TOKEN=
-```
-
-The Censys collector only looks up IP addresses already discovered through the scan's DNS A and AAAA records. It does not resolve additional targets, connect to target services, or scan ports. Lookups are limited to 10 IP addresses per scan and normalized service data is kept compact.
-
-For URLScan search, configure:
-
-```dotenv
-URLSCAN_API_KEY=
-```
-
-This release only uses URLScan's search endpoint for existing public observations. It does not submit the target or any URL for a new scan.
-
-`CENSYS_API_ID` and `CENSYS_API_SECRET` remain available as legacy configuration fields, but v0.5.0-alpha5 uses `CENSYS_API_TOKEN`.
-
-Do not commit `.env` or share credentials. Account access and API limits depend on each provider's plan.
+Censys only receives IP addresses already found in DNS A or AAAA records. Lookups are bounded to ten IPs and fifty normalized services per host.
 
 ## Run locally
 
-Start the backend from the repository root:
+Backend:
 
 ```bash
 source .venv/bin/activate
 uvicorn backend.main:app --reload
 ```
 
-Start the frontend in another terminal:
+Frontend:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open `http://localhost:5173`. The Vite development server proxies API requests to `http://localhost:8000`.
+Open `http://localhost:5173`.
 
-## Run with Docker Compose
+## Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-The dashboard is available at `http://localhost:5173` and the API at `http://localhost:8000`.
+The workspace is served at `http://localhost:5173`; the API is served at `http://localhost:8000`.
 
 ## API
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Return service health |
-| `POST` | `/api/scans` | Run and store a passive domain scan |
-| `GET` | `/api/scans` | List stored scans |
-| `GET` | `/api/scans/{scan_id}` | Return scan metadata and collector statuses |
-| `GET` | `/api/scans/{scan_id}/report` | Return the normalized report and timeline |
-
-Create a scan:
+| `GET` | `/health` | Service health |
+| `POST` | `/api/scans` | Run and store a passive investigation |
+| `GET` | `/api/scans` | List stored investigations |
+| `GET` | `/api/scans/{scan_id}` | Investigation metadata and collector status |
+| `GET` | `/api/scans/{scan_id}/report` | Current schema-2.0 enriched report |
 
 ```bash
 curl -X POST http://localhost:8000/api/scans \
@@ -157,22 +116,37 @@ curl -X POST http://localhost:8000/api/scans \
   -d '{"target":"example.com"}'
 ```
 
-Collectors execute sequentially. Depending on source response times, creating a scan can take up to several collector timeout periods.
+Collection is synchronous and sequential to keep source usage bounded and predictable.
 
-## Analyst workflow
+## Investigation workflow
 
-The workspace is organized as an evidence-review sequence:
+1. Executive Summary: review coverage, confidence, completeness, exposure, and high-level observations.
+2. Infrastructure: inspect addresses, ownership, providers, countries, ports, protocols, and source health.
+3. Technology: review fingerprints, reasoning, and exact passive evidence references.
+4. Organization: correlate ownership, network, domain, mail, nameserver, certificate, and provider entities.
+5. Certificates: inspect validity, SANs, wildcards, duplicates, reuse, and relationships.
+6. Relationships: explore the interactive entity graph.
+7. Timeline: filter and review chronological historical observations.
+8. Findings: separate observed facts from cross-source correlations and analyst notes.
+9. Raw Evidence: inspect, copy, or download normalized collector payloads and the complete report.
 
-1. **Executive Summary** presents the Investigation Verdict and the highest-priority findings.
-2. **Infrastructure** correlates passive addresses, ownership, providers, locations, services, ports, and DNS records.
-3. **Relationships** groups entities into a bounded hierarchical graph with zoom, fit, and layout controls.
-4. **Timeline** provides source filtering, event counts, repeated-event grouping, and chronological context.
-5. **Findings** separates Critical, Warning, Notice, and Info observations with concise evidence summaries.
-6. **Raw Evidence** contains full collector output with search, collapse/expand, copy, and JSON download controls.
+## Report compatibility
 
-Verdict text and findings are deterministic. They only reference evidence present in the stored report; TraceLens does not infer vulnerabilities or make unsupported attribution claims.
+Raw collector payloads and API routes remain compatible with earlier reports. `enrich_report()` rebuilds current derived sections when a stored report is read. Schema 2.0 adds:
 
-## Tests
+- `technology`
+- `organization`
+- `certificates`
+- `correlations`
+- `findings`
+- `executive_summary`
+- graph groups, relationship counts, and edge metadata
+- timeline evidence references
+- `derivation_errors`
+
+See [docs/REPORT_SCHEMA.md](docs/REPORT_SCHEMA.md).
+
+## Verification
 
 ```bash
 python -m compileall backend
@@ -185,23 +159,11 @@ npm run lint
 
 External services are mocked in the test suite.
 
-## Passive-first security model
+## Security and privacy
 
-The current release only uses public DNS, WHOIS, certificate transparency, web archive, optional URLScan search, optional Shodan passive DNS, and optional Censys host intelligence sources. URLScan queries existing observations only, and Censys requests are limited to addresses already present in DNS results. TraceLens does not connect to target web services or enumerate target infrastructure through active probes. Each collector has a timeout, returns classified structured errors, and cannot terminate the remaining collection sequence.
+TraceLens stores public source responses and derived report sections in local SQLite. It does not store optional API credentials in reports. Keep `.env` private and comply with source terms and applicable law.
 
-Use TraceLens only for lawful research and analysis.
-
-## Data storage
-
-The default database is `.tracelens/tracelens.sqlite3`. The directory and schema are created automatically. Database files, local environment files, caches, build output, and logs are excluded from Git.
-
-## Support TraceLens
-
-GitHub Sponsors: https://github.com/sponsors/shadowbipnode
-
-Lightning: `zap@shadowbip.com`
-
-Bitcoin: `bc1qgppvys2e0zx3r87fvtdytwped3xft385sj9800`
+See [docs/SECURITY.md](docs/SECURITY.md) and [private-docs/SECURITY_MODEL.md](private-docs/SECURITY_MODEL.md).
 
 ## License
 

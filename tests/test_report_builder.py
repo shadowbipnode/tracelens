@@ -450,3 +450,26 @@ def test_infrastructure_builder_combines_passive_sources_and_providers():
     assert infrastructure["countries"] == ["IT"]
     assert infrastructure["providers"] == ["Cloudflare"]
     assert infrastructure["cloud_or_cdn_detected"] is True
+
+
+def test_enrichment_isolates_malformed_optional_source_data():
+    report = {
+        "target": "example.com",
+        "status": "partial",
+        "completed_at": "2026-06-25T00:00:00Z",
+        "collectors": {
+            "dns": {
+                "status": "error",
+                "data": {"records": ["unexpected"]},
+                "errors": ["invalid payload"],
+            }
+        },
+        "timeline": [],
+    }
+
+    enriched = enrich_report(report)
+
+    assert enriched["collectors"]["dns"]["data"]["records"] == ["unexpected"]
+    assert enriched["derivation_errors"]
+    assert enriched["technology"]["fingerprints"] == []
+    assert enriched["findings"]["analyst_notes"] == []

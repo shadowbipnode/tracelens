@@ -2,6 +2,20 @@ from datetime import datetime, timezone
 from ipaddress import ip_address
 from typing import Any, Dict, List, Optional
 
+from backend.intelligence import (
+    build_certificate_intelligence,
+    build_correlations,
+    build_executive_summary,
+    build_findings,
+    build_organization_intelligence,
+    build_technology_intelligence,
+    build_timeline,
+)
+from backend.intelligence.common import (
+    compact_organizations,
+    normalize_asn,
+    normalize_organization_name,
+)
 
 TIMELINE_LABELS = {
     "whois_created": "Domain registered",
@@ -212,8 +226,8 @@ def build_infrastructure(
         "ips": ips,
         "ipv4_count": sum(1 for value in ips if ip_address(value).version == 4),
         "ipv6_count": sum(1 for value in ips if ip_address(value).version == 6),
-        "asns": _compact(asns),
-        "organizations": _compact(organizations),
+        "asns": sorted({asn for value in asns if (asn := normalize_asn(value))}),
+        "organizations": compact_organizations(organizations),
         "providers": providers,
         "countries": _compact(countries),
         "ports": normalized_ports,
@@ -224,7 +238,11 @@ def build_infrastructure(
 
 
 def build_graph(
-    target: str, collectors: Dict[str, Dict[str, Any]]
+    target: str,
+    collectors: Dict[str, Dict[str, Any]],
+    correlations: Optional[Dict[str, Any]] = None,
+    technology: Optional[Dict[str, Any]] = None,
+    certificate_intelligence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     nodes: Dict[str, Dict[str, Any]] = {}
     edges: Dict[str, Dict[str, Any]] = {}
@@ -237,6 +255,18 @@ def build_graph(
     ) -> Optional[str]:
         if value is None:
             return None
+        if node_type == "asn":
+            canonical = normalize_asn(value)
+            if not canonical:
+                return None
+            value = canonical
+            label = canonical
+        elif node_type == "organization":
+            canonical = normalize_organization_name(value)
+            if not canonical:
+                return None
+            value = canonical
+            label = canonical
         text = str(value).strip().lower()
         if not text:
             return None
@@ -253,7 +283,10 @@ def build_graph(
         return node_id
 
     def edge(
-        source: Optional[str], target_id: Optional[str], edge_type: str
+        source: Optional[str],
+        target_id: Optional[str],
+        edge_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not source or not target_id or source == target_id:
             return
@@ -265,6 +298,7 @@ def build_graph(
                 "source": source,
                 "target": target_id,
                 "type": edge_type,
+                "metadata": metadata or {},
             },
         )
 
@@ -362,6 +396,30 @@ def build_graph(
                 "covered_by_certificate",
             )
 
+    for relationship in (certificate_intelligence or {}).get(
+        "relationships", []
+    )[:200]:
+        certificate_id = node(
+            "certificate",
+            relationship.get("certificate_id"),
+            str(relationship.get("certificate_id")),
+        )
+        domain = str(relationship.get("domain") or "")
+        domain_node = (
+            domain_id
+            if domain.lower() == target.lower()
+            else node("subdomain", domain, domain)
+        )
+        edge(
+            domain_node,
+            certificate_id,
+            "covered_by_certificate",
+            {
+                "confidence": relationship.get("confidence"),
+                "reasoning": relationship.get("reasoning"),
+            },
+        )
+
     service_count = 0
     for host in collectors.get("censys", {}).get("data", {}).get("hosts", []):
         if not isinstance(host, dict) or not host.get("ip"):
@@ -371,30 +429,35 @@ def build_graph(
         edge(ip_id, source_ids.get("censys"), "reported_by")
         autonomous_system = host.get("autonomous_system", {})
         if isinstance(autonomous_system, dict) and autonomous_system.get("asn"):
-            asn = autonomous_system["asn"]
+            asn = normalize_asn(autonomous_system["asn"])
             asn_id = node(
                 "asn",
                 asn,
-                f"AS{asn}",
+                asn,
                 {
-                    key: autonomous_system.get(key)
+                    key: (
+                        normalize_organization_name(autonomous_system.get(key))
+                        if key in {"name", "description"}
+                        else autonomous_system.get(key)
+                    )
                     for key in ("name", "description", "country_code")
                     if autonomous_system.get(key)
                 },
             )
             edge(ip_id, asn_id, "belongs_to_asn")
-            organization = autonomous_system.get("name") or autonomous_system.get(
-                "description"
+            organization = normalize_organization_name(
+                autonomous_system.get("name")
+                or autonomous_system.get("description")
             )
             organization_id = node(
-                "organization", organization, str(organization)
+                "organization", organization, organization
             )
             edge(asn_id, organization_id, "operated_by")
         whois = host.get("whois", {})
         if isinstance(whois, dict):
-            organization = whois.get("organization")
+            organization = normalize_organization_name(whois.get("organization"))
             organization_id = node(
-                "organization", organization, str(organization)
+                "organization", organization, organization
             )
             edge(ip_id, organization_id, "operated_by")
         for service in host.get("services", []):
@@ -437,11 +500,80 @@ def build_graph(
         elif value:
             edge(subdomain_id or domain_id, source_ids.get("shodan"), "observed_by")
 
+    urlscan_data = collectors.get("urlscan", {}).get("data", {})
+    for observed_domain in urlscan_data.get("resource_domains", [])[:75]:
+        resource_id = node(
+            "external_domain", observed_domain, str(observed_domain)
+        )
+        edge(domain_id, resource_id, "loads_resource_from")
+        edge(resource_id, source_ids.get("urlscan"), "reported_by")
+    for observed_domain in urlscan_data.get("linked_domains", [])[:50]:
+        linked_id = node(
+            "external_domain", observed_domain, str(observed_domain)
+        )
+        edge(domain_id, linked_id, "links_to")
+        edge(linked_id, source_ids.get("urlscan"), "reported_by")
+    for observed_domain in urlscan_data.get("script_domains", [])[:50]:
+        script_id = node(
+            "external_domain", observed_domain, str(observed_domain)
+        )
+        edge(domain_id, script_id, "loads_script_from")
+        edge(script_id, source_ids.get("urlscan"), "reported_by")
+
+    for fingerprint in (technology or {}).get("fingerprints", [])[:75]:
+        technology_id = node(
+            "technology",
+            fingerprint.get("value"),
+            str(fingerprint.get("value")),
+            {
+                "category": fingerprint.get("category"),
+                "confidence": fingerprint.get("confidence"),
+                "reasoning": fingerprint.get("reasoning"),
+            },
+        )
+        edge(
+            domain_id,
+            technology_id,
+            "uses_technology",
+            {
+                "confidence": fingerprint.get("confidence"),
+                "evidence_count": len(fingerprint.get("evidence", [])),
+            },
+        )
+
+    for correlation in (correlations or {}).get("items", [])[:250]:
+        left = correlation.get("left", {})
+        right = correlation.get("right", {})
+        left_id = node(
+            str(left.get("type") or "entity"),
+            left.get("value"),
+            str(left.get("value") or ""),
+        )
+        right_id = node(
+            str(right.get("type") or "entity"),
+            right.get("value"),
+            str(right.get("value") or ""),
+        )
+        edge(
+            left_id,
+            right_id,
+            correlation.get("type", "related_to"),
+            {
+                "confidence": correlation.get("confidence"),
+                "reasoning": correlation.get("reasoning"),
+            },
+        )
+
     ordered_nodes = sorted(nodes.values(), key=lambda item: item["id"])
     ordered_edges = sorted(edges.values(), key=lambda item: item["id"])
     type_counts: Dict[str, int] = {}
     for item in ordered_nodes:
         type_counts[item["type"]] = type_counts.get(item["type"], 0) + 1
+    relationship_counts: Dict[str, int] = {}
+    for item in ordered_edges:
+        relationship_counts[item["type"]] = (
+            relationship_counts.get(item["type"], 0) + 1
+        )
     return {
         "nodes": ordered_nodes,
         "edges": ordered_edges,
@@ -449,7 +581,21 @@ def build_graph(
             "node_count": len(ordered_nodes),
             "edge_count": len(ordered_edges),
             "type_counts": dict(sorted(type_counts.items())),
+            "relationship_counts": dict(sorted(relationship_counts.items())),
         },
+        "groups": [
+            {
+                "id": node_type,
+                "label": node_type.replace("_", " ").title(),
+                "node_ids": [
+                    item["id"]
+                    for item in ordered_nodes
+                    if item["type"] == node_type
+                ],
+                "count": count,
+            }
+            for node_type, count in sorted(type_counts.items())
+        ],
     }
 
 
@@ -954,7 +1100,35 @@ def build_verdict(
 
 
 def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
-    timeline = report.get("timeline", [])
+    collectors = report.get("collectors", {})
+    derivation_errors = []
+
+    def derive(
+        section: str, builder: Any, default: Any, *args: Any
+    ) -> Any:
+        try:
+            return builder(*args)
+        except Exception as exc:
+            derivation_errors.append(
+                {
+                    "section": section,
+                    "category": "derivation_error",
+                    "message": str(exc) or exc.__class__.__name__,
+                    "recoverable": True,
+                }
+            )
+            return default
+
+    timeline = derive(
+        "timeline",
+        build_timeline,
+        report.get("timeline", []),
+        collectors,
+        report.get("timeline", []),
+        report.get("started_at"),
+        report.get("completed_at"),
+    )
+    report["timeline"] = timeline
     for event in timeline:
         event.setdefault(
             "label",
@@ -964,28 +1138,265 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
             ),
         )
 
-    collectors = report.get("collectors", {})
-    report["progress"] = build_progress(
-        report.get("status", "unknown"), collectors
+    report["schema_version"] = "2.0"
+    report["progress"] = derive(
+        "progress",
+        build_progress,
+        {
+            "total_collectors": 0,
+            "completed_collectors": 0,
+            "successful_collectors": 0,
+            "skipped_collectors": 0,
+            "failed_collectors": 0,
+            "percent": 0,
+            "state": "failed",
+            "steps": [],
+        },
+        report.get("status", "unknown"),
+        collectors,
     )
-    report["infrastructure"] = build_infrastructure(collectors)
-    report["graph"] = build_graph(report.get("target", ""), collectors)
-    report["summary"] = build_summary(
+    report["infrastructure"] = derive(
+        "infrastructure",
+        build_infrastructure,
+        {
+            "ips": [],
+            "ipv4_count": 0,
+            "ipv6_count": 0,
+            "asns": [],
+            "organizations": [],
+            "providers": [],
+            "countries": [],
+            "ports": [],
+            "protocols": [],
+            "service_count": 0,
+            "cloud_or_cdn_detected": False,
+        },
+        collectors,
+    )
+    report["summary"] = derive(
+        "summary",
+        build_summary,
+        {
+            "target": report.get("target", ""),
+            "status": report.get("status", "unknown"),
+            "domain_age_years": None,
+            "registrar": None,
+            "nameserver_count": 0,
+            "mx_count": 0,
+            "txt_count": 0,
+            "a_count": 0,
+            "aaaa_count": 0,
+            "certificate_count": 0,
+            "subdomain_count": 0,
+            "wayback_capture_count": 0,
+            "shodan_subdomain_count": 0,
+            "shodan_record_count": 0,
+            "censys_host_count": 0,
+            "censys_service_count": 0,
+            "censys_asn_count": 0,
+            "censys_port_count": 0,
+            "urlscan_result_count": 0,
+            "urlscan_domain_count": 0,
+            "urlscan_ip_count": 0,
+            "first_seen": None,
+            "last_updated": None,
+        },
         report.get("target", ""),
         report.get("status", "unknown"),
         report.get("completed_at", ""),
         collectors,
         timeline,
     )
-    report["insights"] = [
-        *build_dns_insights(collectors),
-        *build_shodan_insights(collectors),
-        *build_censys_insights(collectors),
-        *build_workspace_insights(
+    legacy_insights = derive(
+        "legacy_insights",
+        lambda value: [
+            *build_dns_insights(value),
+            *build_shodan_insights(value),
+            *build_censys_insights(value),
+        ],
+        [],
+        collectors,
+    )
+    report["technology"] = derive(
+        "technology",
+        build_technology_intelligence,
+        {
+            "fingerprints": [],
+            "categories": {},
+            "observed_sources": [],
+            "fingerprint_count": 0,
+            "evidence_count": 0,
+        },
+        collectors,
+    )
+    report["certificates"] = derive(
+        "certificates",
+        build_certificate_intelligence,
+        {
+            "certificates": [],
+            "certificate_count": 0,
+            "issuers": [],
+            "wildcard_count": 0,
+            "expired_count": 0,
+            "duplicate_certificates": [],
+            "shared_certificates": [],
+            "reuse_count": 0,
+            "relationships": [],
+        },
+        report.get("target", ""),
+        collectors,
+        report.get("completed_at"),
+    )
+    report["correlations"] = derive(
+        "correlations",
+        build_correlations,
+        {"items": [], "count": 0, "type_counts": {}},
+        report.get("target", ""),
+        collectors,
+        report["certificates"],
+        report["technology"],
+    )
+    report["organization"] = derive(
+        "organization",
+        build_organization_intelligence,
+        {
+            "target": report.get("target", ""),
+            "organizations": [],
+            "asns": [],
+            "certificate_issuers": [],
+            "domains": [report.get("target", "")],
+            "subdomains": [],
+            "mx": [],
+            "nameservers": [],
+            "ips": [],
+            "cloud_providers": [],
+            "relationships": [],
+            "stats": {
+                "organization_count": 0,
+                "asn_count": 0,
+                "domain_count": 1,
+                "ip_count": 0,
+                "provider_count": 0,
+            },
+        },
+        report.get("target", ""),
+        collectors,
+        report["certificates"],
+        report["correlations"],
+    )
+    report["graph"] = derive(
+        "graph",
+        build_graph,
+        {
+            "nodes": [],
+            "edges": [],
+            "groups": [],
+            "stats": {
+                "node_count": 0,
+                "edge_count": 0,
+                "type_counts": {},
+                "relationship_counts": {},
+            },
+        },
+        report.get("target", ""),
+        collectors,
+        report["correlations"],
+        report["technology"],
+        report["certificates"],
+    )
+    legacy_insights.extend(
+        derive(
+            "workspace_insights",
+            build_workspace_insights,
+            [],
             collectors, report["graph"], report["infrastructure"]
-        ),
-    ]
-    report["verdict"] = build_verdict(
+        )
+    )
+    report["insights"] = legacy_insights
+    report["findings"] = derive(
+        "findings",
+        build_findings,
+        {
+            "observed_facts": [],
+            "correlated_findings": [],
+            "analyst_notes": [],
+            "all": [],
+            "counts": {
+                "observed_facts": 0,
+                "correlated_findings": 0,
+                "analyst_notes": 0,
+                "total": 0,
+            },
+        },
+        legacy_insights,
+        report["correlations"],
+        report["technology"],
+        report["certificates"],
+        collectors,
+    )
+    report["executive_summary"] = derive(
+        "executive_summary",
+        build_executive_summary,
+        {
+            "investigation_status": report.get("status", "unknown"),
+            "infrastructure_overview": {},
+            "hosting": {},
+            "cloud": [],
+            "mail_infrastructure": [],
+            "technology_stack": [],
+            "passive_exposure": {
+                "ports": [],
+                "protocols": [],
+                "host_count": 0,
+                "service_count": 0,
+            },
+            "collection_quality": {
+                "coverage": "limited",
+                "coverage_ratio": 0,
+                "confidence": "limited",
+                "evidence_completeness": "limited",
+                "successful_sources": [],
+                "failed_sources": [],
+                "skipped_sources": [],
+                "corroborated_technology_count": 0,
+                "evidence_reference_count": 0,
+            },
+            "timeline_event_count": len(timeline),
+            "high_level_observations": [],
+        },
+        report.get("status", "unknown"),
+        collectors,
+        report["infrastructure"],
+        report["technology"],
+        report["organization"],
+        report["findings"],
+        timeline,
+        report["summary"],
+    )
+    report["verdict"] = derive(
+        "verdict",
+        build_verdict,
+        {
+            "target": report.get("target", ""),
+            "investigation_status": report.get("status", "unknown"),
+            "coverage_status": "Limited",
+            "risk_level": "Informational",
+            "confidence_level": "Limited",
+            "domain_age_years": None,
+            "registrar": None,
+            "infrastructure_providers": [],
+            "email_providers": [],
+            "host_intelligence_sources": [],
+            "timeline": {
+                "event_count": len(timeline),
+                "first_observation": None,
+                "last_observation": None,
+            },
+            "sources_used": [],
+            "narrative": (
+                "Derived assessment was unavailable. Review raw evidence."
+            ),
+        },
         report.get("target", ""),
         report.get("status", "unknown"),
         collectors,
@@ -994,4 +1405,5 @@ def enrich_report(report: Dict[str, Any]) -> Dict[str, Any]:
         report["infrastructure"],
         report["insights"],
     )
+    report["derivation_errors"] = derivation_errors
     return report

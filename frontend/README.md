@@ -1,20 +1,26 @@
 # TraceLens frontend
 
-The M1 dashboard submits domains to the TraceLens API, lists stored scans, and renders collector results and timeline events.
+The React workspace renders schema-2.0 investigation reports from the TraceLens API.
 
-Install and run:
+Views:
+
+- Executive Summary
+- Infrastructure
+- Technology
+- Organization
+- Certificates
+- Relationships
+- Timeline
+- Findings
+- Raw Evidence
+
+The relationship graph uses native SVG and React state for dragging, panning, wheel zoom, category filtering, search, selection, and entity inspection. No graph dependency is required.
 
 ```bash
 npm install
 npm run dev
-```
-
-The development server proxies `/api` and `/health` to `http://localhost:8000`.
-
-Create a production build:
-
-```bash
 npm run build
+npm run lint
 ```
 
-Set `VITE_API_URL` when the API is hosted on a different origin.
+The development server proxies `/api` and `/health` to `http://localhost:8000`. Set `VITE_API_URL` when the API is hosted on another origin.

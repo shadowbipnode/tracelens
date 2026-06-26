@@ -1,242 +1,87 @@
-# TraceLens Security Model
+# TraceLens security model
 
-## Overview
+## Purpose
 
-TraceLens is a passive-first OSINT intelligence platform.
+TraceLens collects and correlates publicly available domain intelligence while minimizing operational, privacy, legal, and source-abuse risk.
 
-The objective is to collect, normalize, correlate, and present publicly available information while minimizing legal, ethical, and operational risks.
-
-Security is a core product requirement, not an afterthought.
-
----
-
-## Core Principles
-
-TraceLens must operate according to the following principles:
-
-- Passive-first
-- Evidence-based
-- Auditable
-- Explainable
-- Least intrusive
-- Safe by default
-
-Every feature should be evaluated against these principles.
-
----
-
-## Passive-First Requirement
-
-M1 and all early releases must remain passive.
+## Collection boundary
 
 Allowed:
 
-- DNS queries
-- WHOIS lookups
-- Certificate Transparency lookups
-- Wayback Machine queries
-- Public metadata collection
-- Public document metadata extraction
-- Public source aggregation
+- public DNS queries
+- public WHOIS lookups
+- certificate transparency queries
+- web archive metadata queries
+- search of existing public URLScan observations
+- Shodan passive DNS queries
+- Censys metadata queries for IPs already discovered in DNS
 
 Not allowed:
 
-- Port scanning
-- Vulnerability scanning
-- Exploitation
-- Brute forcing
-- Authentication attempts
-- Login automation
-- Credential testing
-- Directory brute forcing
-- Service fingerprinting through active probing
+- port scanning
+- vulnerability scanning
+- direct service fingerprinting
+- directory or subdomain brute forcing
+- authentication attempts
+- credential testing
+- exploitation
+- target web-page requests
 
----
+## Evidence model
 
-## Evidence Model
+Observed facts are normalized source values.
 
-TraceLens must distinguish between:
+Correlated findings are deterministic relationships between observed entities.
 
-### Observed Facts
+Every derived fingerprint and correlation must contain:
 
-Directly collected information.
+- confidence
+- reasoning
+- evidence references
 
-Examples:
+Unsupported conclusions are omitted.
 
-- DNS record
-- WHOIS field
-- Certificate SAN
-- Wayback URL
+## Failure isolation
 
-Observed facts should be preserved exactly as collected.
+Collectors:
 
----
+- use bounded timeouts
+- validate response structure
+- classify errors
+- avoid exposing credentials
+- return partial normalized data when available
+- never terminate the remaining collection sequence
 
-### Derived Findings
+Derived sections are independently guarded. A builder failure is recorded in `derivation_errors`; raw collector data and other workspace views remain available.
 
-Information generated through deterministic logic.
+## Secrets
 
-Examples:
+Optional provider credentials are supplied through environment variables or an ignored local `.env` file. Credentials must not be committed, logged, or copied into report JSON.
 
-- Subdomain count
-- First certificate appearance
-- Timeline event generation
-
-Derived findings must reference their source data.
-
----
-
-### Correlations
-
-Relationships inferred from multiple observations.
-
-Examples:
-
-- Shared infrastructure
-- Related domains
-- Common ownership indicators
-
-Correlations must include confidence levels.
-
----
-
-### AI-Assisted Conclusions
-
-Future AI-generated summaries.
-
-Requirements:
-
-- Evidence-backed
-- Explainable
-- Confidence-scored
-- Clearly labeled
-
-AI output must never be treated as raw evidence.
-
----
-
-## Collector Security Rules
-
-Every collector must:
-
-- use request timeouts
-- validate inputs
-- sanitize outputs
-- return structured errors
-- avoid leaking secrets
-- avoid crashing orchestration
-
-Collectors must fail gracefully.
-
----
-
-## Secrets Management
-
-Secrets must never be committed.
-
-Forbidden in repository:
-
-- API keys
-- Tokens
-- Passwords
-- Cookies
-- Session identifiers
-- Database credentials
-
-Configuration must be supplied via:
-
-- environment variables
-- .env files excluded from Git
-
----
-
-## Data Storage Rules
+## Storage
 
 Allowed:
 
-- scan results
-- metadata
-- timeline events
-- collector status
-- public findings
+- public collector responses
+- scan metadata
+- structured errors
+- derived findings and relationships
+- local analyst notes when that feature is implemented
 
-Not allowed:
+Forbidden:
 
 - plaintext credentials
-- authentication tokens
-- private dumps
+- access tokens
+- cookies
+- private credential dumps
 - leaked passwords
 
-Future breach integrations must only expose metadata.
+SQLite is local by default. Operators are responsible for filesystem access and report retention.
 
----
+## Source safety
 
-## Auditability
+Collection is sequential and bounded. URLScan is search-only. Censys receives at most ten DNS-discovered addresses and retains at most fifty normalized services per host. crt.sh and Wayback retries are limited.
 
-Every scan should record:
+## Analyst interpretation
 
-- target
-- timestamp
-- collector list
-- execution duration
-- success/failure state
-- error messages
-
-Future versions should add:
-
-- user identity
-- workspace identity
-- export history
-
----
-
-## Rate Limiting
-
-Collectors must:
-
-- respect source limitations
-- avoid excessive concurrency
-- use configurable timeouts
-- implement safe retries
-
-TraceLens should avoid behavior likely to trigger bans or abuse protections.
-
----
-
-## Legal Positioning
-
-TraceLens is intended for:
-
-- security analysis
-- research
-- journalism
-- infrastructure investigations
-- compliance activities
-
-TraceLens is not intended for:
-
-- unauthorized access
-- exploitation
-- credential attacks
-- disruption of services
-
----
-
-## Future AI Requirements
-
-Future AI systems must:
-
-- cite evidence
-- provide confidence scores
-- expose uncertainty
-- avoid unsupported claims
-
-AI must not:
-
-- invent findings
-- hide uncertainty
-- fabricate sources
-- recommend illegal activity
-
-Evidence must always remain accessible to the analyst.
-
+Historical observations do not prove current state. Provider signatures describe matching passive evidence, not legal ownership. Moderate-confidence matches should be reviewed against cited evidence before external use.

@@ -44,6 +44,15 @@ def test_create_list_and_retrieve_scan(client):
     assert report.json()["progress"]["state"] == "completed"
     assert report.json()["graph"]["stats"]["node_count"] >= 1
     assert report.json()["infrastructure"]["ips"] == ["93.184.216.34"]
+    assert report.json()["schema_version"] == "2.0"
+    assert report.json()["technology"]["fingerprints"] == []
+    assert report.json()["organization"]["target"] == "example.com"
+    assert report.json()["certificates"]["certificate_count"] == 0
+    assert report.json()["findings"]["counts"]["total"] >= 1
+    assert report.json()["executive_summary"]["collection_quality"][
+        "coverage"
+    ] in {"moderate", "high"}
+    assert report.json()["derivation_errors"] == []
     assert any(
         insight["title"] == "Relationship graph available"
         for insight in report.json()["insights"]

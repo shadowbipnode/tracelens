@@ -27,6 +27,11 @@ def _empty_data() -> Dict[str, Any]:
         "asns": [],
         "organizations": [],
         "locations": [],
+        "hostnames": [],
+        "cloud_providers": [],
+        "operating_systems": [],
+        "observed_technologies": [],
+        "certificates": [],
         "truncated": False,
     }
 
@@ -124,6 +129,64 @@ def _tls_names(service: Dict[str, Any]) -> List[str]:
     return _compact(candidates)[:20]
 
 
+def _tls_certificate(service: Dict[str, Any]) -> Dict[str, Any]:
+    tls = _mapping(service.get("tls"))
+    certificates = _mapping(tls.get("certificates"))
+    leaf_data = _mapping(certificates.get("leaf_data"))
+    leaf = _mapping(certificates.get("leaf"))
+    certificate = {**leaf, **leaf_data}
+    names = _tls_names(service)
+    normalized = {
+        "names": names,
+        "common_name": (
+            certificate.get("subject_common_name")
+            or certificate.get("common_name")
+        ),
+        "issuer": (
+            certificate.get("issuer_dn")
+            or certificate.get("issuer")
+            or certificate.get("issuer_common_name")
+        ),
+        "serial_number": certificate.get("serial_number"),
+        "fingerprint_sha256": (
+            certificate.get("fingerprint_sha256")
+            or certificate.get("sha256_fingerprint")
+        ),
+        "not_before": certificate.get("not_before"),
+        "not_after": certificate.get("not_after"),
+    }
+    return {
+        key: value
+        for key, value in normalized.items()
+        if value not in (None, "", [])
+    }
+
+
+def _software(service: Dict[str, Any]) -> List[str]:
+    values: List[Any] = []
+    for key in ("software", "products", "technologies"):
+        for item in service.get(key, []) if isinstance(service.get(key), list) else []:
+            if isinstance(item, dict):
+                parts = []
+                for value in (
+                    item.get("vendor"),
+                    item.get("product"),
+                    item.get("version"),
+                ):
+                    if value and str(value).lower() not in {
+                        part.lower() for part in parts
+                    }:
+                        parts.append(str(value))
+                product = " ".join(
+                    parts
+                )
+                if product:
+                    values.append(product)
+            elif item:
+                values.append(item)
+    return _compact(values)
+
+
 def _normalize_service(service: Dict[str, Any]) -> Dict[str, Any]:
     protocol = service.get("protocol") or service.get("service_name")
     normalized = {
@@ -143,10 +206,30 @@ def _normalize_service(service: Dict[str, Any]) -> Dict[str, Any]:
             service.get("service_name")
             or service.get("extended_service_name")
         ),
+        "server": service.get("server"),
+        "title": service.get("title"),
+        "banner": service.get("banner"),
     }
+    http = _mapping(service.get("http"))
+    response = _mapping(http.get("response"))
+    headers = _mapping(response.get("headers"))
+    if headers:
+        normalized["http_headers"] = {
+            str(key).lower(): value for key, value in headers.items()
+        }
+    if response.get("html_title") and not normalized.get("title"):
+        normalized["title"] = response.get("html_title")
+    if response.get("body_hash"):
+        normalized["body_hash"] = response.get("body_hash")
+    software = _software(service)
+    if software:
+        normalized["software"] = software
     tls_names = _tls_names(service)
     if tls_names:
         normalized["tls_certificate_names"] = tls_names
+    tls_certificate = _tls_certificate(service)
+    if tls_certificate:
+        normalized["tls_certificate"] = tls_certificate
     return {key: value for key, value in normalized.items() if value is not None}
 
 
@@ -157,6 +240,11 @@ def _normalize_host(payload: Dict[str, Any], requested_ip: str) -> Dict[str, Any
     whois = _mapping(host.get("whois"))
     whois_network = _mapping(
         whois.get("network") or whois.get("network_info")
+    )
+    dns = _mapping(host.get("dns"))
+    cloud = _mapping(host.get("cloud"))
+    operating_system = _mapping(
+        host.get("operating_system") or host.get("os")
     )
     raw_services = host.get("services", [])
     if raw_services is None:
@@ -186,6 +274,13 @@ def _normalize_host(payload: Dict[str, Any], requested_ip: str) -> Dict[str, Any
     }
     if normalized_location:
         normalized["location"] = normalized_location
+    coordinates = {
+        key: location.get(key)
+        for key in ("latitude", "longitude", "postal_code", "timezone")
+        if location.get(key) is not None
+    }
+    if coordinates:
+        normalized["location"].update(coordinates)
 
     normalized_as = {
         "asn": autonomous_system.get("asn"),
@@ -219,6 +314,43 @@ def _normalize_host(payload: Dict[str, Any], requested_ip: str) -> Dict[str, Any
     }
     if normalized_whois:
         normalized["whois"] = normalized_whois
+    hostnames = _compact(
+        [
+            *(
+                host.get("names", [])
+                if isinstance(host.get("names"), list)
+                else []
+            ),
+            *(
+                host.get("hostnames", [])
+                if isinstance(host.get("hostnames"), list)
+                else []
+            ),
+            *(
+                dns.get("names", [])
+                if isinstance(dns.get("names"), list)
+                else []
+            ),
+        ]
+    )
+    if hostnames:
+        normalized["hostnames"] = hostnames
+    normalized_cloud = {
+        key: cloud.get(key)
+        for key in ("provider", "service", "region", "zone")
+        if cloud.get(key)
+    }
+    if normalized_cloud:
+        normalized["cloud"] = normalized_cloud
+    operating_systems = _compact(
+        [
+            operating_system.get("name"),
+            operating_system.get("vendor"),
+            operating_system.get("product"),
+        ]
+    )
+    if operating_systems:
+        normalized["operating_systems"] = operating_systems
     return normalized
 
 
@@ -336,6 +468,37 @@ def collect_censys(
         for host in hosts
         if host.get("location")
     )
+    hostnames = _compact(
+        value for host in hosts for value in host.get("hostnames", [])
+    )
+    cloud_providers = _compact(
+        _mapping(host.get("cloud")).get("provider") for host in hosts
+    )
+    operating_systems = _compact(
+        value
+        for host in hosts
+        for value in host.get("operating_systems", [])
+    )
+    observed_technologies = _compact(
+        value
+        for host in hosts
+        for service in host["services"]
+        for value in [
+            service.get("server"),
+            *service.get("software", []),
+        ]
+        if value
+    )
+    certificates = [
+        {
+            "ip": host["ip"],
+            "port": service.get("port"),
+            **service["tls_certificate"],
+        }
+        for host in hosts
+        for service in host["services"]
+        if service.get("tls_certificate")
+    ]
     data = {
         "hosts": hosts,
         "host_count": len(hosts),
@@ -345,6 +508,11 @@ def collect_censys(
         "asns": asns,
         "organizations": organizations,
         "locations": locations,
+        "hostnames": hostnames,
+        "cloud_providers": cloud_providers,
+        "operating_systems": operating_systems,
+        "observed_technologies": observed_technologies,
+        "certificates": certificates,
         "truncated": (
             len(addresses) > HOST_LIMIT
             or any(host["services_truncated"] for host in hosts)

@@ -297,13 +297,30 @@ def test_censys_parses_host_response(monkeypatch):
                         "transport_protocol": "TCP",
                         "scan_time": "2026-06-20T10:00:00Z",
                         "service_name": "HTTPS",
+                        "software": [
+                            {
+                                "vendor": "nginx",
+                                "product": "nginx",
+                                "version": "1.25",
+                            }
+                        ],
+                        "http": {
+                            "response": {
+                                "html_title": "Example",
+                                "headers": {"Server": ["nginx"]},
+                            }
+                        },
                         "tls": {
                             "certificates": {
                                 "leaf_data": {
                                     "names": [
                                         "example.com",
                                         "www.example.com",
-                                    ]
+                                    ],
+                                    "issuer_dn": "CN=Example CA",
+                                    "serial_number": "01",
+                                    "not_before": "2026-01-01T00:00:00Z",
+                                    "not_after": "2026-04-01T00:00:00Z",
                                 }
                             }
                         },
@@ -334,6 +351,9 @@ def test_censys_parses_host_response(monkeypatch):
     assert result["data"]["hosts"][0]["services"][0][
         "tls_certificate_names"
     ] == ["example.com", "www.example.com"]
+    assert result["data"]["observed_technologies"] == ["nginx 1.25"]
+    assert result["data"]["certificates"][0]["issuer"] == "CN=Example CA"
+    assert result["data"]["hosts"][0]["services"][0]["title"] == "Example"
 
 
 @pytest.mark.parametrize(
@@ -436,7 +456,16 @@ def test_urlscan_parses_search_response(monkeypatch):
                     "country": "IT",
                     "server": "cloudflare",
                     "mimeType": "text/html",
+                    "title": "Example Domain",
+                    "faviconHash": "12345",
                 },
+                "technologies": ["React", "Cloudflare"],
+                "frameworks": ["React"],
+                "resourceDomains": ["cdn.example.net"],
+                "linkedDomains": ["docs.example.net"],
+                "scriptDomains": ["scripts.example.net"],
+                "analytics": ["Google Analytics"],
+                "tracking": ["Google Tag Manager"],
                 "verdicts": {"overall": {"malicious": False}},
                 "screenshot": "https://urlscan.io/screenshots/example.png",
             },
@@ -464,6 +493,14 @@ def test_urlscan_parses_search_response(monkeypatch):
     assert result["data"]["domains"] == ["example.com", "www.example.com"]
     assert result["data"]["ips"] == ["192.0.2.10", "192.0.2.11"]
     assert result["data"]["screenshot_count"] == 1
+    assert result["data"]["titles"] == ["Example Domain"]
+    assert result["data"]["technologies"] == ["Cloudflare", "React"]
+    assert result["data"]["frameworks"] == ["React"]
+    assert result["data"]["resource_domains"] == ["cdn.example.net"]
+    assert result["data"]["linked_domains"] == ["docs.example.net"]
+    assert result["data"]["script_domains"] == ["scripts.example.net"]
+    assert result["data"]["favicon_hashes"] == ["12345"]
+    assert result["data"]["cdn"] == ["Cloudflare"]
 
 
 def test_urlscan_errors_are_structured(monkeypatch):

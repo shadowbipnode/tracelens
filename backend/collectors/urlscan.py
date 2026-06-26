@@ -1,4 +1,5 @@
-from typing import Any, Dict, Iterable, List
+from urllib.parse import urlparse
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -34,8 +35,59 @@ def _empty_data() -> Dict[str, Any]:
         "asns": [],
         "countries": [],
         "servers": [],
+        "titles": [],
+        "technologies": [],
+        "frameworks": [],
+        "redirect_chains": [],
+        "favicon_hashes": [],
+        "resource_domains": [],
+        "linked_domains": [],
+        "script_domains": [],
+        "analytics": [],
+        "tracking": [],
+        "cdn": [],
+        "cloud": [],
+        "hosting_hints": [],
         "screenshot_count": 0,
     }
+
+
+def _values(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _domain_from_url(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return urlparse(str(value)).hostname
+    except ValueError:
+        return None
+
+
+def _extract_named_values(item: Dict[str, Any], *keys: str) -> List[str]:
+    values: List[Any] = []
+    containers = [
+        item,
+        item.get("data"),
+        item.get("stats"),
+        item.get("lists"),
+        item.get("result"),
+    ]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, dict):
+                values.extend(value.keys())
+            else:
+                values.extend(_values(value))
+    return _compact(values)
 
 
 def _normalize_result(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,7 +97,11 @@ def _normalize_result(item: Dict[str, Any]) -> Dict[str, Any]:
         item.get("verdicts") if isinstance(item.get("verdicts"), dict) else {}
     )
     normalized = {
-        "task": {"time": task.get("time")},
+        "task": {
+            "time": task.get("time"),
+            "url": task.get("url"),
+            "domain": task.get("domain"),
+        },
         "page": {
             "url": page.get("url"),
             "domain": page.get("domain"),
@@ -55,10 +111,53 @@ def _normalize_result(item: Dict[str, Any]) -> Dict[str, Any]:
             "country": page.get("country"),
             "server": page.get("server"),
             "mimeType": page.get("mimeType"),
+            "title": page.get("title"),
+            "status": page.get("status"),
+            "redirected": page.get("redirected"),
+            "favicon": page.get("favicon"),
+            "faviconHash": page.get("faviconHash")
+            or page.get("favicon_hash"),
         },
         "verdicts": verdicts,
         "screenshot": item.get("screenshot"),
     }
+    technologies = _extract_named_values(
+        item, "technologies", "technology", "tech"
+    )
+    frameworks = _extract_named_values(item, "frameworks", "framework")
+    resource_domains = _extract_named_values(
+        item, "resourceDomains", "resource_domains", "domains"
+    )
+    linked_domains = _extract_named_values(
+        item, "linkedDomains", "linked_domains", "links"
+    )
+    script_domains = _extract_named_values(
+        item, "scriptDomains", "script_domains", "scripts"
+    )
+    analytics = _extract_named_values(item, "analytics")
+    tracking = _extract_named_values(item, "tracking", "trackers")
+    redirect_chain = _extract_named_values(
+        item, "redirectChain", "redirect_chain", "redirects"
+    )
+    if (
+        not redirect_chain
+        and task.get("url")
+        and page.get("url")
+        and task.get("url") != page.get("url")
+    ):
+        redirect_chain = [str(task["url"]), str(page["url"])]
+    for key, values in {
+        "technologies": technologies,
+        "frameworks": frameworks,
+        "resource_domains": resource_domains,
+        "linked_domains": linked_domains,
+        "script_domains": script_domains,
+        "analytics": analytics,
+        "tracking": tracking,
+        "redirect_chain": redirect_chain,
+    }.items():
+        if values:
+            normalized[key] = values
     normalized["task"] = {
         key: value for key, value in normalized["task"].items() if value
     }
@@ -131,6 +230,74 @@ def collect_urlscan(target: str, settings: Settings) -> Dict[str, Any]:
             for result in results
             if isinstance(result.get("page"), dict)
         ]
+        result_values = lambda field: (
+            value
+            for result in results
+            for value in _values(result.get(field))
+        )
+        resource_domains = [
+            *result_values("resource_domains"),
+            *(
+                domain
+                for result in results
+                for value in _values(result.get("resource_domains"))
+                if (domain := _domain_from_url(value))
+            ),
+        ]
+        linked_domains = [
+            *result_values("linked_domains"),
+            *(
+                domain
+                for result in results
+                for value in _values(result.get("linked_domains"))
+                if (domain := _domain_from_url(value))
+            ),
+        ]
+        script_domains = [
+            *result_values("script_domains"),
+            *(
+                domain
+                for result in results
+                for value in _values(result.get("script_domains"))
+                if (domain := _domain_from_url(value))
+            ),
+        ]
+        server_values = _compact(page.get("server") for page in pages)
+        technology_values = _compact(result_values("technologies"))
+        framework_values = _compact(result_values("frameworks"))
+        analytics_values = _compact(result_values("analytics"))
+        tracking_values = _compact(result_values("tracking"))
+        combined_hints = [
+            *server_values,
+            *technology_values,
+            *framework_values,
+            *(
+                page.get("asnname")
+                for page in pages
+                if page.get("asnname")
+            ),
+        ]
+        hint_text = " ".join(str(value).lower() for value in combined_hints)
+        cdn = _compact(
+            name
+            for name, markers in {
+                "Cloudflare": ("cloudflare",),
+                "Fastly": ("fastly",),
+                "Akamai": ("akamai",),
+                "Amazon CloudFront": ("cloudfront",),
+            }.items()
+            if any(marker in hint_text for marker in markers)
+        )
+        cloud = _compact(
+            name
+            for name, markers in {
+                "Amazon Web Services": ("amazon", "aws", "amazonaws"),
+                "Google Cloud": ("google cloud", "googleusercontent"),
+                "Microsoft Azure": ("microsoft", "azure"),
+                "Cloudflare": ("cloudflare",),
+            }.items()
+            if any(marker in hint_text for marker in markers)
+        )
         data = {
             "result_count": int(
                 payload.get("total", len(raw_results)) or len(raw_results)
@@ -140,7 +307,29 @@ def collect_urlscan(target: str, settings: Settings) -> Dict[str, Any]:
             "ips": _compact(page.get("ip") for page in pages),
             "asns": _compact(page.get("asn") for page in pages),
             "countries": _compact(page.get("country") for page in pages),
-            "servers": _compact(page.get("server") for page in pages),
+            "servers": server_values,
+            "titles": _compact(page.get("title") for page in pages),
+            "technologies": technology_values,
+            "frameworks": framework_values,
+            "redirect_chains": [
+                result["redirect_chain"]
+                for result in results
+                if result.get("redirect_chain")
+            ],
+            "favicon_hashes": _compact(
+                page.get("faviconHash") or page.get("favicon")
+                for page in pages
+            ),
+            "resource_domains": _compact(resource_domains),
+            "linked_domains": _compact(linked_domains),
+            "script_domains": _compact(script_domains),
+            "analytics": analytics_values,
+            "tracking": tracking_values,
+            "cdn": cdn,
+            "cloud": cloud,
+            "hosting_hints": _compact(
+                page.get("asnname") for page in pages
+            ),
             "screenshot_count": sum(
                 1 for result in results if result.get("screenshot")
             ),

@@ -1,12 +1,15 @@
 import axios from 'axios'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent as ReactWheelEvent } from 'react'
 import './App.css'
 
 type CollectorStatus = 'ok' | 'error' | 'skipped'
 type ViewId =
   | 'summary'
   | 'infrastructure'
+  | 'technology'
+  | 'organization'
+  | 'certificates'
   | 'relationships'
   | 'timeline'
   | 'findings'
@@ -35,6 +38,8 @@ type TimelineEvent = {
   timestamp: string
   source: string
   detail?: string
+  entity?: string
+  evidence_ref?: string
 }
 
 type ReportSummary = {
@@ -108,6 +113,7 @@ type GraphEdge = {
   source: string
   target: string
   type: string
+  metadata?: Record<string, unknown>
 }
 
 type RelationshipGraph = {
@@ -117,7 +123,134 @@ type RelationshipGraph = {
     node_count: number
     edge_count: number
     type_counts: Record<string, number>
+    relationship_counts?: Record<string, number>
   }
+  groups?: Array<{
+    id: string
+    label: string
+    node_ids: string[]
+    count: number
+  }>
+}
+
+type EvidenceReference = {
+  source: string
+  field: string
+  value: unknown
+  context?: string
+}
+
+type Fingerprint = {
+  category: string
+  name: string
+  value: string
+  confidence: string
+  reasoning: string
+  evidence: EvidenceReference[]
+}
+
+type TechnologyIntelligence = {
+  fingerprints: Fingerprint[]
+  categories: Record<string, Fingerprint[]>
+  observed_sources: string[]
+  fingerprint_count: number
+  evidence_count: number
+}
+
+type CertificateRecord = {
+  id: string
+  source: string
+  common_name?: string | null
+  issuer?: string | null
+  not_before?: string | null
+  not_after?: string | null
+  sans: string[]
+  wildcards: string[]
+  expired: boolean
+  evidence: EvidenceReference[]
+}
+
+type CertificateIntelligence = {
+  certificates: CertificateRecord[]
+  certificate_count: number
+  issuers: string[]
+  wildcard_count: number
+  expired_count: number
+  duplicate_certificates: Array<Record<string, unknown>>
+  shared_certificates: Array<Record<string, unknown>>
+  reuse_count: number
+  relationships: Array<Record<string, unknown>>
+}
+
+type OrganizationIntelligence = {
+  target: string
+  organizations: Array<{
+    name: string
+    asns: string[]
+    ips: string[]
+    domains: string[]
+    certificates: string[]
+    sources: string[]
+  }>
+  asns: Array<Record<string, unknown>>
+  certificate_issuers: Array<{ name: string; certificates: string[] }>
+  domains: string[]
+  subdomains: string[]
+  mx: string[]
+  nameservers: string[]
+  ips: string[]
+  cloud_providers: Array<{
+    name: string
+    confidence: string
+    reasoning: string
+    evidence: EvidenceReference[]
+  }>
+  relationships: Array<Record<string, unknown>>
+  stats: Record<string, number>
+}
+
+type Finding = Insight & {
+  id: string
+  kind: 'observed_fact' | 'correlated_finding' | 'analyst_note'
+  confidence: string
+  reasoning: string
+  sources: string[]
+}
+
+type FindingsEngine = {
+  observed_facts: Finding[]
+  correlated_findings: Finding[]
+  analyst_notes: Finding[]
+  all: Finding[]
+  counts: Record<string, number>
+}
+
+type ExecutiveIntelligence = {
+  investigation_status: string
+  infrastructure_overview: Record<string, unknown>
+  hosting: Record<string, unknown>
+  cloud: string[]
+  mail_infrastructure: string[]
+  technology_stack: string[]
+  passive_exposure: {
+    ports: number[]
+    protocols: string[]
+    host_count: number
+    service_count: number
+  }
+  collection_quality: {
+    coverage: string
+    coverage_ratio: number
+    confidence: string
+    evidence_completeness: string
+    successful_sources: string[]
+    failed_sources: string[]
+    skipped_sources: string[]
+    corroborated_technology_count: number
+    evidence_reference_count: number
+  }
+  timeline_event_count: number
+  high_level_observations: string[]
 }
 
 type InvestigationVerdict = {
@@ -149,6 +282,7 @@ type Insight = {
 }
 
 type Report = {
+  schema_version?: string
   scan_id: number
   target: string
   status: string
@@ -162,6 +296,17 @@ type Report = {
   infrastructure: Infrastructure
   graph: RelationshipGraph
   verdict?: InvestigationVerdict
+  technology?: TechnologyIntelligence
+  certificates?: CertificateIntelligence
+  organization?: OrganizationIntelligence
+  findings?: FindingsEngine
+  executive_summary?: ExecutiveIntelligence
+  derivation_errors?: Array<{
+    section: string
+    category: string
+    message: string
+    recoverable: boolean
+  }>
 }
 
 type ScanSummary = {
@@ -210,11 +355,26 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_URL ?? '' })
 const navigation: Array<{ id: ViewId; label: string; short: string }> = [
   { id: 'summary', label: 'Executive Summary', short: 'ES' },
   { id: 'infrastructure', label: 'Infrastructure', short: 'IN' },
+  { id: 'technology', label: 'Technology', short: 'TE' },
+  { id: 'organization', label: 'Organization', short: 'OR' },
+  { id: 'certificates', label: 'Certificates', short: 'CT' },
   { id: 'relationships', label: 'Relationships', short: 'RL' },
   { id: 'timeline', label: 'Timeline', short: 'TL' },
   { id: 'findings', label: 'Findings', short: 'FD' },
   { id: 'evidence', label: 'Raw Evidence', short: 'RE' },
 ]
+
+const navigationActions: Record<ViewId, string> = {
+  summary: 'Assess',
+  infrastructure: 'Inspect',
+  technology: 'Fingerprint',
+  organization: 'Attribute',
+  certificates: 'Validate',
+  relationships: 'Correlate',
+  timeline: 'Sequence',
+  findings: 'Review',
+  evidence: 'Verify',
+}
 
 const collectorLabels: Record<string, string> = {
   dns: 'DNS',
@@ -504,6 +664,7 @@ function CollectorHealth({ collectors }: { collectors: Record<string, CollectorR
 }
 
 function FindingCard({ insight }: { insight: Insight }) {
+  const finding = insight as Partial<Finding>
   return (
     <article className={`finding-card ${insight.severity}`}>
       <span className="finding-marker">
@@ -519,6 +680,8 @@ function FindingCard({ insight }: { insight: Insight }) {
         <span className="finding-source">{insight.type.replaceAll('_', ' ')}</span>
         <h3>{insight.title}</h3>
         <p>{insight.description}</p>
+        {finding.reasoning ? <p className="finding-reasoning">{finding.reasoning}</p> : null}
+        {finding.confidence ? <ConfidenceBadge value={finding.confidence} /> : null}
         <div className="finding-evidence">
           <strong>Evidence</strong>
           <span>{evidenceSummary(insight.evidence ?? [])}</span>
@@ -529,6 +692,7 @@ function FindingCard({ insight }: { insight: Insight }) {
 }
 
 function ExecutiveSummary({ report }: { report: Report }) {
+  const executive = report.executive_summary
   const verdict = report.verdict ?? {
     target: report.target,
     investigation_status: report.status,
@@ -583,6 +747,15 @@ function ExecutiveSummary({ report }: { report: Report }) {
           </div>
         </div>
       ) : null}
+      {report.derivation_errors?.length ? (
+        <div className="partial-warning">
+          <span>!</span>
+          <div>
+            <strong>Some derived views are unavailable</strong>
+            <p>Raw evidence remains intact. Review the affected sections and collector payloads.</p>
+          </div>
+        </div>
+      ) : null}
       <Panel
         eyebrow="Evidence-based assessment"
         title="Investigation Verdict"
@@ -622,6 +795,32 @@ function ExecutiveSummary({ report }: { report: Report }) {
           </article>
         ))}
       </section>
+      {executive ? (
+        <div className="summary-grid">
+          <Panel eyebrow="Collection assessment" title="Coverage and evidence quality">
+            <dl className="profile-grid">
+              <div><dt>Coverage</dt><dd>{executive.collection_quality.coverage}</dd></div>
+              <div><dt>Confidence</dt><dd>{executive.collection_quality.confidence}</dd></div>
+              <div><dt>Evidence completeness</dt><dd>{executive.collection_quality.evidence_completeness}</dd></div>
+              <div><dt>Evidence references</dt><dd>{executive.collection_quality.evidence_reference_count}</dd></div>
+            </dl>
+          </Panel>
+          <Panel eyebrow="Correlated profile" title="Infrastructure and stack">
+            <div className="fact-groups">
+              <div><h3>Cloud and CDN</h3><ChipList values={executive.cloud} /></div>
+              <div><h3>Mail infrastructure</h3><ChipList values={executive.mail_infrastructure} /></div>
+              <div><h3>Technology stack</h3><ChipList values={executive.technology_stack} limit={12} /></div>
+            </div>
+          </Panel>
+        </div>
+      ) : null}
+      {executive?.high_level_observations.length ? (
+        <Panel eyebrow="Evidence-backed overview" title="High-level observations">
+          <ul className="observation-list">
+            {executive.high_level_observations.map((observation) => <li key={observation}>{observation}</li>)}
+          </ul>
+        </Panel>
+      ) : null}
       <div className="summary-grid">
         <Panel
           eyebrow="Investigation profile"
@@ -782,6 +981,12 @@ function CensysHosts({ collector }: { collector?: CollectorResult }) {
       meta={<StatusBadge status={collector?.status ?? 'skipped'} />}
     >
       <SourceMessage collector={collector} />
+      <div className="fact-groups">
+        <div><h3>Hostnames</h3><ChipList values={asStrings(collector?.data.hostnames)} /></div>
+        <div><h3>Cloud metadata</h3><ChipList values={asStrings(collector?.data.cloud_providers)} /></div>
+        <div><h3>Operating hints</h3><ChipList values={asStrings(collector?.data.operating_systems)} /></div>
+        <div><h3>Observed technologies</h3><ChipList values={asStrings(collector?.data.observed_technologies)} /></div>
+      </div>
       {hosts.length ? (
         <div className="table-scroll">
           <table>
@@ -950,6 +1155,214 @@ function InfrastructureView({ report }: { report: Report }) {
   )
 }
 
+function ConfidenceBadge({ value }: { value: string }) {
+  return <span className={`confidence confidence-${value.toLowerCase()}`}>{value}</span>
+}
+
+function EvidenceRefs({ items }: { items: EvidenceReference[] }) {
+  return (
+    <div className="evidence-refs">
+      {items.slice(0, 4).map((item, index) => (
+        <span title={compactValue(item.value, 240)} key={`${item.source}-${item.field}-${index}`}>
+          {collectorLabels[item.source] ?? item.source} · {item.field}
+        </span>
+      ))}
+      {items.length > 4 ? <span>+{items.length - 4} evidence</span> : null}
+    </div>
+  )
+}
+
+function TechnologyView({ report }: { report: Report }) {
+  const intelligence = report.technology
+  const categories = intelligence?.categories ?? {}
+  const urlscan = report.collectors.urlscan
+  return (
+    <div className="view-stack">
+      <section className="graph-stats">
+        <div><span>Fingerprints</span><strong>{intelligence?.fingerprint_count ?? 0}</strong></div>
+        <div><span>Evidence refs</span><strong>{intelligence?.evidence_count ?? 0}</strong></div>
+        <div><span>Sources</span><strong>{intelligence?.observed_sources.length ?? 0}</strong></div>
+        <div><span>URLScan results</span><strong>{report.summary.urlscan_result_count}</strong></div>
+      </section>
+      <Panel
+        eyebrow="Passive fingerprinting"
+        title="Technology profile"
+        meta={<span className="panel-meta">Evidence required for every fingerprint</span>}
+      >
+        {Object.keys(categories).length ? (
+          <div className="technology-groups">
+            {Object.entries(categories).map(([category, fingerprints]) => (
+              <section className="technology-group" key={category}>
+                <header>
+                  <div><span>{category}</span><strong>{fingerprints.length}</strong></div>
+                </header>
+                <div>
+                  {fingerprints.map((fingerprint) => (
+                    <article className="intelligence-card" key={`${category}-${fingerprint.value}`}>
+                      <div className="intelligence-card-heading">
+                        <h3>{fingerprint.value}</h3>
+                        <ConfidenceBadge value={fingerprint.confidence} />
+                      </div>
+                      <p>{fingerprint.reasoning}</p>
+                      <EvidenceRefs items={fingerprint.evidence} />
+                    </article>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <div className="graph-empty">
+            <span>◇</span>
+            <strong>No supported fingerprints</strong>
+            <p>The collected passive evidence did not support a technology conclusion.</p>
+          </div>
+        )}
+      </Panel>
+      <Panel
+        eyebrow="Existing public observations"
+        title="URLScan intelligence"
+        meta={<StatusBadge status={urlscan?.status ?? 'skipped'} />}
+      >
+        <SourceMessage collector={urlscan} />
+        <div className="fact-groups">
+          {[
+            ['Page titles', asStrings(urlscan?.data.titles)],
+            ['Servers', asStrings(urlscan?.data.servers)],
+            ['Redirect chains', asStrings(urlscan?.data.redirect_chains)],
+            ['Favicon hashes', asStrings(urlscan?.data.favicon_hashes)],
+            ['Resource domains', asStrings(urlscan?.data.resource_domains)],
+            ['Linked domains', asStrings(urlscan?.data.linked_domains)],
+            ['Script domains', asStrings(urlscan?.data.script_domains)],
+            ['Analytics', asStrings(urlscan?.data.analytics)],
+            ['Tracking', asStrings(urlscan?.data.tracking)],
+            ['CDN', asStrings(urlscan?.data.cdn)],
+            ['Cloud', asStrings(urlscan?.data.cloud)],
+            ['Hosting hints', asStrings(urlscan?.data.hosting_hints)],
+          ].map(([label, values]) => (
+            <div key={String(label)}>
+              <h3>{label}</h3>
+              <ChipList values={values as string[]} limit={12} />
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+function OrganizationView({ report }: { report: Report }) {
+  const organization = report.organization
+  if (!organization) {
+    return <Panel title="Organization intelligence"><p className="empty-inline">Organization intelligence is unavailable for this legacy report.</p></Panel>
+  }
+  return (
+    <div className="view-stack">
+      <section className="metric-grid">
+        {[
+          ['Organizations', organization.stats.organization_count ?? 0, 'Observed ownership'],
+          ['ASNs', organization.stats.asn_count ?? 0, 'Network attribution'],
+          ['Domains', organization.stats.domain_count ?? 0, 'Correlated names'],
+          ['IPs', organization.stats.ip_count ?? 0, 'Passive addresses'],
+          ['Providers', organization.stats.provider_count ?? 0, 'Supported matches'],
+        ].map(([label, value, note]) => (
+          <article className="metric-card" key={String(label)}>
+            <span>{label}</span><strong>{Number(value)}</strong><small>{note}</small>
+          </article>
+        ))}
+      </section>
+      <div className="organization-grid">
+        <Panel eyebrow="Unified profile" title="Organization and network ownership">
+          {organization.organizations.length ? (
+            <div className="organization-list">
+              {organization.organizations.map((item) => (
+                <article className="intelligence-card" key={item.name}>
+                  <div className="intelligence-card-heading"><h3>{item.name}</h3><span className="source-badge">{item.sources.join(', ')}</span></div>
+                  <dl className="compact-dl">
+                    <div><dt>ASNs</dt><dd>{item.asns.join(', ') || 'Not observed'}</dd></div>
+                    <div><dt>IPs</dt><dd>{item.ips.join(', ') || 'Not observed'}</dd></div>
+                    <div><dt>Domains</dt><dd>{item.domains.join(', ') || 'Not observed'}</dd></div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          ) : <p className="empty-inline">No organization ownership metadata was returned.</p>}
+        </Panel>
+        <Panel eyebrow="Infrastructure providers" title="Cloud and hosting indicators">
+          {organization.cloud_providers.length ? organization.cloud_providers.map((provider) => (
+            <article className="intelligence-card" key={provider.name}>
+              <div className="intelligence-card-heading"><h3>{provider.name}</h3><ConfidenceBadge value={provider.confidence} /></div>
+              <p>{provider.reasoning}</p>
+              <EvidenceRefs items={provider.evidence} />
+            </article>
+          )) : <p className="empty-inline">No provider signature was supported.</p>}
+        </Panel>
+      </div>
+      <Panel eyebrow="Correlated entities" title="Domains, mail, nameservers, and certificates">
+        <div className="fact-groups">
+          <div><h3>Domains and subdomains</h3><ChipList values={organization.domains} limit={18} /></div>
+          <div><h3>MX infrastructure</h3><ChipList values={organization.mx} /></div>
+          <div><h3>Nameservers</h3><ChipList values={organization.nameservers} /></div>
+          <div><h3>Certificate issuers</h3><ChipList values={organization.certificate_issuers.map((item) => item.name)} /></div>
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+function CertificatesView({ report }: { report: Report }) {
+  const intelligence = report.certificates
+  if (!intelligence) {
+    return <Panel title="Certificate intelligence"><p className="empty-inline">Certificate intelligence is unavailable for this legacy report.</p></Panel>
+  }
+  return (
+    <div className="view-stack">
+      <section className="metric-grid">
+        {[
+          ['Certificates', intelligence.certificate_count, 'CT and host evidence'],
+          ['Issuers', intelligence.issuers.length, 'Observed'],
+          ['Wildcards', intelligence.wildcard_count, 'Explicit SANs'],
+          ['Expired', intelligence.expired_count, 'At collection time'],
+          ['Reuse groups', intelligence.reuse_count, 'Duplicate identity'],
+          ['Relationships', intelligence.relationships.length, 'Certificate ↔ domain'],
+        ].map(([label, value, note]) => (
+          <article className="metric-card" key={String(label)}>
+            <span>{label}</span><strong>{Number(value)}</strong><small>{note}</small>
+          </article>
+        ))}
+      </section>
+      <Panel eyebrow="Certificate investigation" title="Observed certificates" meta={<span className="panel-meta">{intelligence.certificates.length} normalized records</span>}>
+        {intelligence.certificates.length ? (
+          <div className="certificate-list">
+            {intelligence.certificates.map((certificate, index) => (
+              <article className={`certificate-card ${certificate.expired ? 'expired' : ''}`} key={`${certificate.id}-${certificate.source}-${index}`}>
+                <header>
+                  <div><span>{certificate.source}</span><h3>{certificate.common_name ?? certificate.id}</h3></div>
+                  <StatusBadge status={certificate.expired ? 'error' : 'ok'}>{certificate.expired ? 'Expired' : 'Observed'}</StatusBadge>
+                </header>
+                <dl className="compact-dl">
+                  <div><dt>Issuer</dt><dd>{certificate.issuer ?? 'Not available'}</dd></div>
+                  <div><dt>Valid from</dt><dd>{formatDate(certificate.not_before ?? null, true)}</dd></div>
+                  <div><dt>Valid until</dt><dd>{formatDate(certificate.not_after ?? null, true)}</dd></div>
+                </dl>
+                <ChipList values={certificate.sans} empty="No SAN names were normalized." limit={14} />
+              </article>
+            ))}
+          </div>
+        ) : <p className="empty-inline">No certificate evidence was collected.</p>}
+      </Panel>
+      <div className="organization-grid">
+        <Panel eyebrow="Identity reuse" title="Duplicate certificates">
+          <ChipList values={intelligence.duplicate_certificates.map((item) => compactValue(item))} empty="No duplicate certificate identity was observed." />
+        </Panel>
+        <Panel eyebrow="Shared names" title="Shared certificates">
+          <ChipList values={intelligence.shared_certificates.map((item) => compactValue(item))} empty="No certificate covered unrelated names in collected evidence." />
+        </Panel>
+      </div>
+    </div>
+  )
+}
+
 const graphTypeOrder = [
   'domain',
   'subdomain',
@@ -958,65 +1371,137 @@ const graphTypeOrder = [
   'organization',
   'nameserver',
   'mx',
+  'certificate',
+  'technology',
+  'service',
+  'external_domain',
+  'source',
 ]
 
 function RelationshipsView({ graph }: { graph: RelationshipGraph }) {
-  const [zoom, setZoom] = useState(1)
+  const width = 1400
+  const height = 760
+  const [zoom, setZoom] = useState(0.9)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
   const [layoutVersion, setLayoutVersion] = useState(0)
-  const [expandedGraph, setExpandedGraph] = useState(false)
-  const allowedTypes = new Set(
-    expandedGraph
-      ? [
-          'domain',
-          'subdomain',
-          'ip',
-          'asn',
-          'organization',
-          'nameserver',
-          'mx',
-          'certificate',
-        ]
-      : [
-          'domain',
-          'subdomain',
-          'ip',
-          'asn',
-          'organization',
-          'nameserver',
-          'mx',
-        ],
+  const [query, setQuery] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set(['source']))
+  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({})
+  const interaction = useRef<{
+    mode: 'pan' | 'drag'
+    id?: string
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+  } | null>(null)
+  const nodeTypes = useMemo(
+    () => graphTypeOrder.filter((type) => graph.stats.type_counts[type]),
+    [graph.stats.type_counts],
   )
-
-  const graphNodeLimit = expandedGraph ? 80 : 25
-
-  const visibleNodes = graph.nodes
-    .filter((node) => allowedTypes.has(node.type))
-    .slice(0, graphNodeLimit)
-
-  const visibleIds = new Set(visibleNodes.map((node) => node.id))
-  const visibleEdges = graph.edges.filter(
-    (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+  const visibleNodes = useMemo(() => {
+    const normalized = query.trim().toLowerCase()
+    const matches = graph.nodes.filter(
+      (node) =>
+        !hiddenTypes.has(node.type) &&
+        (!normalized ||
+          node.label.toLowerCase().includes(normalized) ||
+          node.type.toLowerCase().includes(normalized)),
+    )
+    if (normalized) return matches.slice(0, 180)
+    const counts = new Map<string, number>()
+    return matches
+      .filter((node) => {
+        const count = counts.get(node.type) ?? 0
+        counts.set(node.type, count + 1)
+        return count < 24
+      })
+      .slice(0, 180)
+  }, [graph.nodes, hiddenTypes, query])
+  const visibleIds = useMemo(
+    () => new Set(visibleNodes.map((node) => node.id)),
+    [visibleNodes],
   )
-  const width = 1200
-  const height = 620
-  const grouped = graphTypeOrder
-    .map((type) => [type, visibleNodes.filter((node) => node.type === type)] as const)
-    .filter(([, nodes]) => nodes.length)
-  const positions = new Map<string, { x: number; y: number }>()
+  const visibleEdges = useMemo(
+    () =>
+      graph.edges.filter(
+        (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+      ),
+    [graph.edges, visibleIds],
+  )
+  const connectedIds = useMemo(() => {
+    if (!selectedId) return new Set<string>()
+    const ids = new Set([selectedId])
+    visibleEdges.forEach((edge) => {
+      if (edge.source === selectedId) ids.add(edge.target)
+      if (edge.target === selectedId) ids.add(edge.source)
+    })
+    return ids
+  }, [selectedId, visibleEdges])
+  const selectedNode = graph.nodes.find((node) => node.id === selectedId) ?? null
+  const selectedEdges = selectedId
+    ? graph.edges.filter((edge) => edge.source === selectedId || edge.target === selectedId)
+    : []
 
-  grouped.forEach(([, nodes], columnIndex) => {
-    const x = 75 + (columnIndex * (width - 150)) / Math.max(grouped.length - 1, 1)
-    const offset = layoutVersion % 2 === 0 ? 0 : columnIndex % 2 === 0 ? 12 : -12
-    nodes.forEach((node, rowIndex) => {
-      positions.set(node.id, {
-        x,
-        y:
-          58 +
-          (rowIndex * (height - 116)) / Math.max(nodes.length - 1, 1) +
-          offset,
+  useEffect(() => {
+    const grouped = nodeTypes
+      .map((type) => [type, visibleNodes.filter((node) => node.type === type)] as const)
+      .filter(([, nodes]) => nodes.length)
+    const next: Record<string, { x: number; y: number }> = {}
+    grouped.forEach(([, nodes], columnIndex) => {
+      const sectionColumns = Math.min(4, Math.max(grouped.length, 1))
+      const sectionRows = Math.ceil(grouped.length / sectionColumns)
+      const sectionColumn = columnIndex % sectionColumns
+      const sectionRow = Math.floor(columnIndex / sectionColumns)
+      const sectionWidth = (width - 100) / sectionColumns
+      const sectionHeight = (height - 80) / Math.max(sectionRows, 1)
+      const columnCount = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(nodes.length))))
+      const rowCount = Math.ceil(nodes.length / columnCount)
+      const spreadX = Math.min(92, (sectionWidth - 30) / Math.max(columnCount, 1))
+      const spreadY = Math.min(58, (sectionHeight - 35) / Math.max(rowCount, 1))
+      nodes.forEach((node, index) => {
+        const localColumn = index % columnCount
+        const row = Math.floor(index / columnCount)
+        next[node.id] = {
+          x: 50 + sectionColumn * sectionWidth + sectionWidth / 2 +
+            (localColumn - (columnCount - 1) / 2) * spreadX,
+          y: 50 + sectionRow * sectionHeight + sectionHeight / 2 +
+            (row - (rowCount - 1) / 2) * spreadY +
+            ((columnIndex + layoutVersion) % 2) * 8,
+        }
       })
     })
-  })
+    setPositions(next)
+  }, [layoutVersion, nodeTypes, visibleNodes])
+
+  function fitView() {
+    setZoom(0.9)
+    setPan({ x: 0, y: 0 })
+  }
+
+  function pointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    const active = interaction.current
+    if (!active) return
+    const dx = event.clientX - active.startX
+    const dy = event.clientY - active.startY
+    if (active.mode === 'pan') {
+      setPan({ x: active.originX + dx, y: active.originY + dy })
+    } else if (active.id) {
+      setPositions((current) => ({
+        ...current,
+        [active.id as string]: {
+          x: active.originX + dx / zoom,
+          y: active.originY + dy / zoom,
+        },
+      }))
+    }
+  }
+
+  function wheel(event: ReactWheelEvent<SVGSVGElement>) {
+    event.preventDefault()
+    setZoom((value) => Math.min(2.4, Math.max(0.35, value * (event.deltaY > 0 ? 0.9 : 1.1))))
+  }
 
   return (
     <div className="view-stack graph-view">
@@ -1054,36 +1539,62 @@ function RelationshipsView({ graph }: { graph: RelationshipGraph }) {
           <>
             <div className="graph-legend">
               {Object.entries(graph.stats.type_counts).map(([type, count]) => (
-                <span className={`graph-type ${type}`} key={type}>
+                <button
+                  type="button"
+                  className={`graph-type ${type} ${hiddenTypes.has(type) ? 'disabled' : ''}`}
+                  key={type}
+                  onClick={() => setHiddenTypes((current) => {
+                    const next = new Set(current)
+                    if (next.has(type)) next.delete(type)
+                    else next.add(type)
+                    return next
+                  })}
+                >
                   <i />
                   {type} {count}
-                </span>
+                </button>
               ))}
             </div>
             <div className="graph-toolbar" aria-label="Graph controls">
               <button type="button" onClick={() => setZoom((value) => Math.min(1.8, value + 0.2))}>Zoom in</button>
-              <button type="button" onClick={() => setZoom((value) => Math.max(0.6, value - 0.2))}>Zoom out</button>
-              <button type="button" onClick={() => setZoom(1)}>Fit view</button>
-              <button type="button" onClick={() => { setZoom(1); setLayoutVersion((value) => value + 1) }}>Reset layout</button>
-              <button type="button" onClick={() => setExpandedGraph((value) => !value)}>
-                {expandedGraph ? 'Compact graph' : 'Show more'}
-              </button>
+              <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.2))}>Zoom out</button>
+              <button type="button" onClick={fitView}>Fit view</button>
+              <button type="button" onClick={() => { fitView(); setLayoutVersion((value) => value + 1) }}>Reset layout</button>
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search nodes" aria-label="Search graph nodes" />
               <span>{Math.round(zoom * 100)}%</span>
             </div>
+            <div className="graph-workspace">
             <div className="graph-canvas">
               <svg
                 viewBox={`0 0 ${width} ${height}`}
                 role="img"
                 aria-label="Report relationship graph"
                 preserveAspectRatio="xMidYMid meet"
+                onWheel={wheel}
+                onPointerDown={(event) => {
+                  if (event.target !== event.currentTarget) return
+                  event.currentTarget.setPointerCapture(event.pointerId)
+                  interaction.current = {
+                    mode: 'pan',
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originX: pan.x,
+                    originY: pan.y,
+                  }
+                }}
+                onPointerMove={pointerMove}
+                onPointerUp={() => { interaction.current = null }}
+                onPointerCancel={() => { interaction.current = null }}
               >
-                <g transform={`translate(${width * (1 - zoom) / 2} ${height * (1 - zoom) / 2}) scale(${zoom})`}>
+                <g transform={`translate(${pan.x + width * (1 - zoom) / 2} ${pan.y + height * (1 - zoom) / 2}) scale(${zoom})`}>
                 <g className="graph-edges">
                   {visibleEdges.map((edge) => {
-                    const source = positions.get(edge.source)
-                    const target = positions.get(edge.target)
+                    const source = positions[edge.source]
+                    const target = positions[edge.target]
+                    const active = selectedId && (edge.source === selectedId || edge.target === selectedId)
                     return source && target ? (
                       <line
+                        className={active ? 'active' : selectedId ? 'muted' : ''}
                         key={edge.id}
                         x1={source.x}
                         y1={source.y}
@@ -1095,7 +1606,7 @@ function RelationshipsView({ graph }: { graph: RelationshipGraph }) {
                 </g>
                 <g className="graph-nodes">
                   {visibleNodes.map((node) => {
-                    const position = positions.get(node.id)
+                    const position = positions[node.id]
                     if (!position) return null
                     const label =
                       node.label.length > 24
@@ -1103,9 +1614,26 @@ function RelationshipsView({ graph }: { graph: RelationshipGraph }) {
                         : node.label
                     return (
                       <g
-                        className={`graph-node ${node.type}`}
+                        className={`graph-node ${node.type} ${selectedId === node.id ? 'selected' : ''} ${selectedId && !connectedIds.has(node.id) ? 'muted' : ''}`}
                         key={node.id}
                         transform={`translate(${position.x} ${position.y})`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation()
+                          event.currentTarget.setPointerCapture(event.pointerId)
+                          interaction.current = {
+                            mode: 'drag',
+                            id: node.id,
+                            startX: event.clientX,
+                            startY: event.clientY,
+                            originX: position.x,
+                            originY: position.y,
+                          }
+                        }}
+                        onPointerUp={(event) => {
+                          event.stopPropagation()
+                          interaction.current = null
+                          setSelectedId(node.id)
+                        }}
                       >
                         <title>{node.label}</title>
                         <circle r={node.type === 'domain' ? 11 : 7} />
@@ -1119,10 +1647,35 @@ function RelationshipsView({ graph }: { graph: RelationshipGraph }) {
                 </g>
               </svg>
             </div>
+            <aside className="graph-inspector">
+              {selectedNode ? (
+                <>
+                  <span className={`graph-type ${selectedNode.type}`}><i />{selectedNode.type}</span>
+                  <h3>{selectedNode.label}</h3>
+                  <p className="mono-cell">{selectedNode.id}</p>
+                  <dl className="compact-dl">
+                    <div><dt>Connections</dt><dd>{selectedEdges.length}</dd></div>
+                    {Object.entries(selectedNode.metadata ?? {}).map(([key, value]) => (
+                      <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{compactValue(value, 180)}</dd></div>
+                    ))}
+                  </dl>
+                  <div className="relationship-list">
+                    {selectedEdges.slice(0, 12).map((edge) => (
+                      <button type="button" key={edge.id} onClick={() => setSelectedId(edge.source === selectedId ? edge.target : edge.source)}>
+                        <span>{edge.type.replaceAll('_', ' ')}</span>
+                        <strong>{graph.nodes.find((node) => node.id === (edge.source === selectedId ? edge.target : edge.source))?.label ?? 'Entity'}</strong>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="graph-empty"><span>◎</span><strong>Select a node</strong><p>Connected entities and relationship evidence appear here.</p></div>
+              )}
+            </aside>
+            </div>
             {graph.nodes.length > visibleNodes.length ? (
               <p className="graph-note">
-                The visualization is capped for readability. The complete graph is
-                retained in Raw Evidence and the JSON download.
+                {visibleNodes.length} of {graph.nodes.length} nodes are rendered. Use category filters and search to inspect large graphs.
               </p>
             ) : null}
           </>
@@ -1194,59 +1747,61 @@ function TimelineView({ events }: { events: TimelineEvent[] }) {
   )
 }
 
-function FindingsView({ insights }: { insights: Insight[] }) {
-  const groups: Array<{
-    severity: Insight['severity']
-    label: string
-    description: string
-  }> = [
-    {
-      severity: 'critical',
-      label: 'Critical',
-      description: 'Evidence-backed conditions requiring immediate analyst review.',
-    },
-    {
-      severity: 'warning',
-      label: 'Warnings',
-      description: 'Conditions requiring analyst attention.',
-    },
-    {
-      severity: 'notice',
-      label: 'Notices',
-      description: 'Relevant correlations and source conditions.',
-    },
-    {
-      severity: 'info',
-      label: 'Information',
-      description: 'Contextual observations derived from evidence.',
-    },
-  ]
-
+function FindingsView({ report }: { report: Report }) {
+  const engine = report.findings
+  const sections = engine
+    ? [
+        {
+          key: 'observed',
+          label: 'Observed Facts',
+          description: 'Direct observations and deterministic single-source conclusions.',
+          findings: engine.observed_facts,
+        },
+        {
+          key: 'correlated',
+          label: 'Correlated Findings',
+          description: 'Cross-source relationships with evidence and reasoning.',
+          findings: engine.correlated_findings,
+        },
+        {
+          key: 'notes',
+          label: 'Analyst Notes',
+          description: 'Reserved for explicit analyst-authored context.',
+          findings: engine.analyst_notes,
+        },
+      ]
+    : [
+        {
+          key: 'legacy',
+          label: 'Observed Facts',
+          description: 'Evidence-backed report observations.',
+          findings: report.insights as Finding[],
+        },
+      ]
   return (
     <div className="view-stack findings-view">
-      {groups.map((group) => {
-        const matches = insights.filter(
-          (insight) => insight.severity === group.severity,
-        )
-        return (
-          <Panel
-            eyebrow={group.description}
-            title={group.label}
-            meta={<span className="panel-meta">{matches.length}</span>}
-            className={`findings-group ${group.severity}`}
-            key={group.severity}
-          >
-            <div className="finding-list">
-              {matches.map((insight, index) => (
-                <FindingCard insight={insight} key={`${insight.title}-${index}`} />
-              ))}
-              {!matches.length ? (
-                <p className="empty-inline">No {group.label.toLowerCase()}.</p>
-              ) : null}
-            </div>
-          </Panel>
-        )
-      })}
+      {sections.map((section) => (
+        <Panel
+          eyebrow={section.description}
+          title={section.label}
+          meta={<span className="panel-meta">{section.findings.length}</span>}
+          className="findings-group"
+          key={section.key}
+        >
+          <div className="finding-list">
+            {section.findings.map((finding, index) => (
+              <FindingCard insight={finding} key={`${finding.title}-${index}`} />
+            ))}
+            {!section.findings.length ? (
+              <p className="empty-inline">
+                {section.key === 'notes'
+                  ? 'No analyst notes are stored in this report.'
+                  : `No ${section.label.toLowerCase()}.`}
+              </p>
+            ) : null}
+          </div>
+        </Panel>
+      ))}
     </div>
   )
 }
@@ -1474,11 +2029,7 @@ function App() {
               <span className="nav-copy">
                 <strong>{item.label}</strong>
                 <small>
-                  {item.id === 'summary' ? 'Assess' :
-                    item.id === 'infrastructure' ? 'Inspect' :
-                      item.id === 'relationships' ? 'Correlate' :
-                        item.id === 'timeline' ? 'Sequence' :
-                          item.id === 'findings' ? 'Review' : 'Verify'}
+                  {navigationActions[item.id]}
                 </small>
               </span>
             </button>
@@ -1537,7 +2088,7 @@ function App() {
             ) : null}
           </div>
         </section>
-        <span className="version">v0.6.0-alpha6</span>
+        <span className="version">v0.7.0-alpha1 · schema 2.0</span>
       </aside>
 
       <main className="workspace">
@@ -1623,6 +2174,15 @@ function App() {
               {activeView === 'infrastructure' ? (
                 <InfrastructureView report={report} />
               ) : null}
+              {activeView === 'technology' ? (
+                <TechnologyView report={report} />
+              ) : null}
+              {activeView === 'organization' ? (
+                <OrganizationView report={report} />
+              ) : null}
+              {activeView === 'certificates' ? (
+                <CertificatesView report={report} />
+              ) : null}
               {activeView === 'relationships' ? (
                 <RelationshipsView graph={report.graph} />
               ) : null}
@@ -1630,7 +2190,7 @@ function App() {
                 <TimelineView events={report.timeline} />
               ) : null}
               {activeView === 'findings' ? (
-                <FindingsView insights={report.insights} />
+                <FindingsView report={report} />
               ) : null}
               {activeView === 'evidence' ? (
                 <RawEvidenceView report={report} />
